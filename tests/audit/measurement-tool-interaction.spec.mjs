@@ -1208,7 +1208,7 @@ const exitMode = async page => {
   await page.waitForFunction(modeIsOff);
 };
 
-test('view only: a saved line stays after the ruler is turned off and is purely passive', { timeout: 120000 }, async t => {
+test('view only: a saved line stays after the ruler is turned off and is passive until it is clicked', { timeout: 120000 }, async t => {
   const browser = await launch();
   t.after(() => browser.close());
   const { page, errors } = await openMeasuring(browser);
@@ -1264,8 +1264,18 @@ test('view only: a saved line stays after the ruler is turned off and is purely 
   assert.equal(await page.evaluate(() => document.body.style.cursor || document.getElementById('viewport').style.cursor), '', 'no ruler cursor');
   await click(page, mid);
   await frames(page, 4);
-  assert.deepEqual(await overlayState(page), SAVED_ONLY, 'a click on the line neither selects nor places anything');
+  // Saved-record editing needs no creation mode: the click selects the line (grips appear) and places or writes nothing.
+  assert.equal(await page.evaluate(() => document.querySelectorAll('.tp3d-measure-svg__segment.is-selected').length), 1, 'a click on the line selects it');
+  assert.equal(await page.evaluate(() => window.probe.MeasurementTool.isActive()), false, 'and arms nothing');
+  assert.equal(await page.evaluate(() => window.probe.MeasurementTool.hasPending()), false, 'and starts no measurement');
   assert.equal(await page.evaluate(() => document.getElementById('editor-measure-panel').hidden), true);
+  assert.equal(JSON.stringify(await page.evaluate(() => window.probe.measurements())), saved, 'nothing was written');
+  // Escape deselects it; with nothing selected the view is purely passive again and holds no listener.
+  await page.focus('#viewport');
+  await page.keyboard.press('Escape');
+  await frames(page, 4);
+  assert.deepEqual(await overlayState(page), SAVED_ONLY, 'Escape deselects the line');
+  assert.deepEqual(await page.evaluate(() => window.__liveListeners()), [], 'and the capture listeners go with the selection');
 
   // Keyboard: nothing here belongs to the ruler.
   await page.focus('#viewport');
@@ -1400,5 +1410,72 @@ test('view only: nothing is drawn while an operation runs, for another Load Plan
   await page.waitForFunction(() => document.querySelectorAll('.tp3d-measure-svg__segment').length === 1);
   await drawn(SAVED_ONLY);
   assert.equal(JSON.stringify(await page.evaluate(() => window.probe.measurements())), saved, 'the preference never touched the records');
+  assert.deepEqual(errors, []);
+});
+
+test('a saved measurement is selected and edited without creation mode: a click selects, a grip drag is one step, a still grip press does nothing, an off-canvas release cancels, closing the manager keeps the selection and Escape clears it', { timeout: 240000 }, async t => {
+  const browser = await launch();
+  t.after(() => browser.close());
+  const { page, errors } = await openEditor(browser);
+  await page.evaluate(([a, b]) => {
+    const { M, PackLibrary } = window.probe;
+    const at = ([x, y, z]) => M.buildSpaceAnchor({ surface: 'ground', point: { x, y, z } });
+    if (!PackLibrary.addMeasurement('fixture-pack', { start: at(a), end: at(b) }).ok) throw new Error('measurement seed failed');
+  }, [GROUND_A, GROUND_B]);
+  await page.waitForFunction(() => document.querySelectorAll('.tp3d-measure-svg__segment').length === 1);
+  const settle = () => page.evaluate(() => new Promise(resolve => { let n = 0; const step = () => (++n > 12 ? resolve() : window.requestAnimationFrame(step)); window.requestAnimationFrame(step); }));
+  const ends = () => page.evaluate(() => JSON.stringify(window.probe.measurements().map(m => [m.start, m.end])));
+  const packs = () => page.evaluate(() => JSON.stringify(window.probe.StateStore.get('packLibrary')));
+  const selected = () => page.evaluate(() => document.querySelectorAll('.tp3d-measure-svg__segment.is-selected').length);
+  const flags = () => page.evaluate(() => ({ armed: window.probe.MeasurementTool.isActive(), pending: window.probe.MeasurementTool.hasPending() }));
+  const drag = async (from, to) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y, { steps: 8 });
+    await page.mouse.up();
+    await settle();
+  };
+  await settle();
+  const original = await ends();
+  const startPacks = await packs();
+
+  // A click on the saved line selects it: no manager, no New measurement, no history.
+  const mid = await point(page, 180, 0, 75);
+  await click(page, mid);
+  await settle();
+  assert.equal(await selected(), 1, 'the click selected the line');
+  assert.deepEqual(await flags(), { armed: false, pending: false });
+  assert.equal(await packs(), startPacks, 'selecting wrote nothing');
+
+  // A grip press that never moves begins nothing and writes nothing.
+  const gripAt = await point(page, ...GROUND_B);
+  await click(page, gripAt);
+  await settle();
+  assert.deepEqual(await flags(), { armed: false, pending: false }, 'a still grip press does not begin Point A');
+  assert.equal(await ends(), original);
+
+  // Released outside the canvas: cancelled, nothing written, and a prior Undo stays redoable.
+  await drag(gripAt, { x: 700, y: 20 });
+  assert.equal(await ends(), original, 'an off-canvas release changes nothing');
+  assert.equal(await packs(), startPacks, 'and writes nothing');
+
+  // A real drag onto the ground moves the endpoint as one history step.
+  await drag(gripAt, await point(page, 330, 0, 140));
+  assert.notEqual(await ends(), original, 'the endpoint moved');
+  assert.deepEqual(await flags(), { armed: false, pending: false });
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+  assert.equal(await ends(), original, 'one Undo restores it: the drag was one step');
+  // The cancelled and still presses above left Redo intact: this Undo is redoable.
+  assert.equal(await page.evaluate(() => window.probe.StateStore.redo()), true, 'Redo replays the move');
+
+  // Closing the manager keeps the selection (and its editable grips); Escape clears it.
+  await page.click('#btn-editor-measure');
+  await page.click('#btn-editor-measure');
+  await settle();
+  assert.equal(await selected(), 1, 'closing the manager kept the selection');
+  await page.focus('#viewport');
+  await page.keyboard.press('Escape');
+  await settle();
+  assert.equal(await selected(), 0, 'Escape deselected it');
   assert.deepEqual(errors, []);
 });

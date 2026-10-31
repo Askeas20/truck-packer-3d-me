@@ -4,7 +4,7 @@
  *   lines and the compact measurement list. THREE and DOM concerns live here; the data model,
  *   validation and geometry resolution live in core/measurements.js and persistence lives in
  *   PackLibrary. The tool is an illustrative, informational ruler: it never moves cargo, never
- *   changes the cargo selection, and never participates in collision, assessment, AutoPack or exports.
+ *   changes the cargo selection while creating, and never participates in collision, assessment, AutoPack or exports.
  *
  *   A point can be placed on anything visible: any cargo surface (any shape), the truck floor,
  *   wheel-well tops and deck, the truck walls, ceiling and end planes, and the ground anywhere,
@@ -24,9 +24,15 @@
  *     they always do; a gesture that loses its cargo is cancelled by sync() and writes nothing.
  *   - Lines, ticks and labels are drawn as an SVG/DOM layer above the canvas, so they can never
  *     appear in a canvas capture (Screenshot, PDF views, thumbnails, previews).
- *   - Saved measurements and the editing mode are separate. A saved Valid measurement stays drawn after the
- *     mode ends ("view only"): just its line, ticks and distance label, with no grips, draft points or
- *     hover marker, no pointer or keyboard ownership and no write of any kind. The view follows cargo,
+ *   - Saved measurements and the creation mode are separate. A saved Valid measurement stays drawn after the
+ *     mode ends ("view only"): its line, ticks and distance label, with no draft points or hover marker, and
+ *     with nothing selected no pointer or keyboard ownership and no write of any kind. Editing a saved record
+ *     does not need creation: the Editor selects one on a click on its line or label (lineHitAt/select; a drag
+ *     that starts there stays the camera or cargo drag), the selected measurement shows grips, and a press on a
+ *     grip is claimed in the capture phase and dragged through the same endpoint writer. Selecting one replaces
+ *     any cargo or annotation selection (and the reverse), so Delete never reaches cargo through it. A drag
+ *     released off the canvas, Escape, Undo, an unchanged or rejected target all write nothing. The capture
+ *     listeners exist only while armed, selected or dragging. The view follows cargo,
  *     camera, projection and viewport changes, and it is drawn only for the committed scene: nothing is
  *     drawn while AutoPack, Unpack or a truck change runs or while an unapplied preview is shown. Hiding the
  *     tool in Settings hides the lines with it. Saved callouts stay drawn while the mode is on.
@@ -78,6 +84,8 @@ const GRIP_HALF_PX = 8;
 const MARKER_ARM_PX = 5;
 const GRIP_HIT_RADIUS_PX = 16;
 const LINE_HIT_PX = 6;
+// How far from a saved line (px) a click still selects it while creation is off: a finger needs more room than a mouse.
+const LINE_SELECT_REACH_PX = Object.freeze({ mouse: LINE_HIT_PX, pen: 9, touch: 12 });
 // Near an endpoint a click places a point instead of selecting, so a new measurement can start from
 // the corner of an existing one (length, then width from the same corner).
 const ENDPOINT_CLICK_ZONE_PX = 14;
@@ -119,6 +127,8 @@ export function createMeasurementTool({
   let pending = null; // { anchor, world: THREE.Vector3, poseKey } — Point A of a measurement being created
   let selectedId = null; // the completed measurement that shows grips
   let drag = null; // { id, which, pointerId, candidate, dirty, poseKeys } — an endpoint being repositioned
+  let listening = false; // the document capture listeners (grip press, Escape, Undo) are registered: only while armed, selected or dragging
+  let selfClearing = false; // this tool is itself clearing the other selections: the store notification it causes is not a reason to deselect
   let hover = null; // latest surface pick under the pointer
   let hoverGrip = null; // 'start' | 'end' when the pointer is over the selected measurement's grip
   let hoverMeasurementId = null;
@@ -227,6 +237,33 @@ export function createMeasurementTool({
 
   // The Editor holds a scene-only pose (live drag, gizmo stroke, held case): meshes are not where the Load Plan says.
   const provisionalPoseActive = () => typeof els.hasProvisionalPose === 'function' && Boolean(els.hasProvisionalPose());
+
+  /** The only writer of the selection: the capture listeners follow it, so nothing listens while nothing is selected or armed. */
+  function setSelected(id) {
+    selectedId = id;
+    syncInputListeners();
+  }
+
+  function syncInputListeners() {
+    if (!doc) return;
+    const wanted = active || Boolean(selectedId) || Boolean(drag);
+    if (wanted === listening) return;
+    listening = wanted;
+    const method = wanted ? 'addEventListener' : 'removeEventListener';
+    doc[method]('keydown', onKeyDownCapture, true);
+    doc[method]('pointerdown', onPointerDownCapture, true);
+  }
+
+  /** One saved scene object or one cargo selection at a time: selecting a measurement drops the cargo and annotation selections. */
+  function clearOtherSelections() {
+    if (typeof els.clearOtherSelections !== 'function') return;
+    selfClearing = true;
+    try {
+      els.clearOtherSelections();
+    } finally {
+      selfClearing = false;
+    }
+  }
 
   // The one surface picker shared with the Annotations tool: picking, committed-pose keys, ambiguous-ID
   // refusal and live (displayed-pose) anchor positions. See editor/surface-picker.js.
@@ -596,9 +633,10 @@ export function createMeasurementTool({
     const canvas = getCanvas();
     if (!canvas) return;
     let cursor = 'default';
-    if (active) {
-      if (drag) cursor = 'grabbing';
-      else if (hoverGrip) cursor = 'grab';
+    if (drag) {
+      cursor = 'grabbing';
+    } else if (active) {
+      if (hoverGrip) cursor = 'grab';
       else if (hoverMeasurementId) cursor = 'pointer';
       else if (hover) cursor = 'crosshair';
     }
@@ -625,7 +663,16 @@ export function createMeasurementTool({
 
   function frame(now) {
     if (!active) {
-      // View only: redraw the saved lines for the camera and cargo as they are now. No hit testing, no cursor.
+      // View only: redraw the saved lines for the camera and cargo as they are now. The one gesture is a selected measurement's
+      // grip drag; the Editor's own hover handles the cursor, so only a drag sets it here.
+      if (drag) {
+        const blocked = syncBlocked();
+        if (drag && drag.dirty && lastClient) {
+          drag.dirty = false;
+          drag.candidate = blocked || !insideCanvas(lastClient.x, lastClient.y) ? null : pick(lastClient.x, lastClient.y);
+        }
+        updateCursor();
+      }
       updateOverlay();
       return;
     }
@@ -633,7 +680,7 @@ export function createMeasurementTool({
     if (drag) {
       if (drag.dirty && lastClient) {
         drag.dirty = false;
-        drag.candidate = reason ? null : pick(lastClient.x, lastClient.y);
+        drag.candidate = reason || !insideCanvas(lastClient.x, lastClient.y) ? null : pick(lastClient.x, lastClient.y);
       }
     } else if (hoverDirty && lastClient && now - lastHoverPickAt >= HOVER_PICK_INTERVAL_MS) {
       hoverDirty = false;
@@ -649,7 +696,9 @@ export function createMeasurementTool({
   function loop(now) {
     rafId = null;
     if (!active && !viewOnlyWanted()) {
-      // Nothing is left to show (other Load Plan, left the Editor, tool hidden, no Valid measurement).
+      // Nothing is left to show (other Load Plan, left the Editor, tool hidden, no Valid measurement): nothing stays selected.
+      cancelDrag();
+      setSelected(null);
       disposeAllVisuals();
       return;
     }
@@ -688,7 +737,7 @@ export function createMeasurementTool({
     managerOpen = true;
     pending = null;
     drag = null;
-    selectedId = null;
+    setSelected(null);
     hover = null;
     hoverGrip = null;
     hoverMeasurementId = null;
@@ -702,10 +751,7 @@ export function createMeasurementTool({
     syncNewButton();
     if (els.labels) els.labels.classList.add('is-active');
     ensureSvg();
-    if (doc) {
-      doc.addEventListener('keydown', onKeyDownCapture, true);
-      doc.addEventListener('pointerdown', onPointerDownCapture, true);
-    }
+    syncInputListeners();
     sync();
     if (els.panel) els.panel.hidden = false;
     renderPanel();
@@ -727,12 +773,14 @@ export function createMeasurementTool({
     return true;
   }
 
-  function exit() {
+  function exit({ keepSelection = false } = {}) {
     const wasActive = active;
     endDrag();
     active = false;
     pending = null;
-    selectedId = null;
+    // Hiding the manager keeps a selection made on a saved record. What a creation session auto-selected after saving is part of that
+    // session (cargo may be selected beside it, as creation always allowed), so it ends with it.
+    setSelected(keepSelection && !wasActive && selectedId ? selectedId : null);
     hover = null;
     hoverGrip = null;
     hoverMeasurementId = null;
@@ -743,10 +791,6 @@ export function createMeasurementTool({
     statusTimer = null;
     statusMessage = '';
     statusTone = '';
-    if (doc) {
-      doc.removeEventListener('keydown', onKeyDownCapture, true);
-      doc.removeEventListener('pointerdown', onPointerDownCapture, true);
-    }
     if (els.labels) els.labels.classList.remove('is-active');
     if (els.panel) els.panel.hidden = !managerOpen;
     if (!managerOpen && panelObserver) {
@@ -809,10 +853,14 @@ export function createMeasurementTool({
     return true;
   }
 
-  /** Hide the Measurements manager. Creation ends too (a pending first point is dropped, nothing is written); saved lines stay drawn. */
-  function closeManager() {
+  /**
+   * Hide the Measurements manager. Creation ends too (a pending first point is dropped, nothing is written); saved lines stay drawn.
+   * With `keepSelection` (the toolbar button) a selected saved measurement stays selected and editable; every other caller is
+   * leaving the Load Plan, the Editor or the tool, so the selection goes with it.
+   */
+  function closeManager({ keepSelection = false } = {}) {
     managerOpen = false;
-    exit();
+    exit({ keepSelection });
     if (els.panel) els.panel.hidden = true;
     if (panelObserver) {
       panelObserver.disconnect();
@@ -912,7 +960,7 @@ export function createMeasurementTool({
     }
     if (!pending) {
       pending = { anchor: picked.anchor, world: picked.world.clone(), poseKey: cargoPoseKey(pack, picked.anchor) };
-      selectedId = null;
+      setSelected(null);
       setStatus('', { sticky: true });
       return;
     }
@@ -935,23 +983,88 @@ export function createMeasurementTool({
       renderPanel();
       return;
     }
-    selectedId = outcome.measurement.id;
+    setSelected(outcome.measurement.id);
     setStatus('Measurement saved.', { tone: 'success' });
   }
 
   // ==========================================================================
   // SECTION: SELECTION + ENDPOINT REPOSITIONING
   // ==========================================================================
+  /**
+   * Select (or with null, deselect) a saved measurement, from its list row, from a click on its line, or after it was saved. Selecting
+   * one replaces any cargo or annotation selection, so only one thing is selected and Delete can never reach cargo through it.
+   * It needs neither the manager nor creation: it writes nothing and adds no history.
+   */
   function selectMeasurement(id) {
-    selectedId = id && records.some(record => record.id === id) ? id : null;
+    const target = id && records.some(record => record.id === id) ? id : null;
+    // While creating, selecting a saved line (or its row) leaves the cargo selection alone, as creation always has.
+    if (target && target !== selectedId && !active) {
+      if (blockedReason()) return false;
+      if (provisionalPoseActive()) {
+        notice('Place or cancel the held case before selecting a measurement.');
+        return false;
+      }
+      clearOtherSelections();
+    }
+    setSelected(target);
     hoverGrip = null;
     renderPanel();
+    if (!active && viewOnlyWanted()) updateOverlay();
+    return true;
   }
 
-  /** Claim a press on the selected measurement's grip before OrbitControls or the Editor sees it. */
+  /** Another tool or the cargo took the selection: drop this one quietly (creation is not touched). */
+  function clearSelection() {
+    if (!selectedId || active) return;
+    cancelDrag();
+    setSelected(null);
+    renderPanel();
+    if (viewOnlyWanted()) updateOverlay();
+  }
+
+  /**
+   * The saved measurement whose line or label is nearest a client position, within the pointer's reach: `{ id, distance }` or null.
+   * A pure query on the geometry the last frame drew (nothing is projected here). Endpoint zones count, unlike creation, where they
+   * place a point. Only while creation is off: the armed tool does its own hit testing. It claims nothing: the Editor selects on a
+   * click, so a drag that starts on a line is still the camera or cargo drag it was.
+   */
+  function lineHitAt(clientX, clientY, pointerType = 'mouse') {
+    if (active || !visuals.size || !inEditor() || blockedReason()) return null;
+    const p = toLayerPoint({ x: clientX, y: clientY });
+    const reach = LINE_SELECT_REACH_PX[pointerType] || LINE_HIT_PX;
+    let best = null;
+    visuals.forEach((visual, id) => {
+      const screen = visual.screen;
+      if (!screen) return;
+      let distance = distanceToSegment(p, screen.p1, screen.p2);
+      const box = screen.labelBox;
+      if (box && Math.abs(p.x - box.x) <= box.w / 2 && Math.abs(p.y - box.y) <= box.h / 2) distance = 0;
+      if (distance <= reach && (!best || distance < best.distance)) best = { id, distance };
+    });
+    return best;
+  }
+
+  /** Whether the pointer is the one dragging a grip: the Editor's hover and cargo handling leave it alone. */
+  function ownsPointer(ev) {
+    return Boolean(drag && ev && ev.pointerId === drag.pointerId);
+  }
+
+  function insideCanvas(x, y) {
+    const canvas = getCanvas();
+    if (!canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+
+  /**
+   * Claim a press on the selected measurement's grip before OrbitControls or the Editor sees it. Armed or not: a saved measurement's
+   * selected grips are editable without creation mode. Unarmed, a press with Shift/Ctrl/Cmd stays camera navigation and an armed
+   * Annotations tool keeps the canvas.
+   */
   function onPointerDownCapture(ev) {
     if (active) keyboardModality = false;
-    if (!active || ev.button !== 0 || drag || pending) return;
+    if (ev.button !== 0 || ev.isPrimary === false || drag || pending || !selectedId) return;
+    if (!active && (ev.shiftKey || ev.ctrlKey || ev.metaKey || (typeof els.isAnnotationToolActive === 'function' && els.isAnnotationToolActive()))) return;
     const canvas = getCanvas();
     if (!canvas || ev.target !== canvas) return;
     const which = gripAt({ x: ev.clientX, y: ev.clientY });
@@ -998,10 +1111,16 @@ export function createMeasurementTool({
     const travelled = Math.hypot(ev.clientX - finished.startX, ev.clientY - finished.startY);
     endDrag();
     hoverDirty = true;
-    // A press on a grip that never moved is an ordinary click: it places a point, so a new
-    // measurement can begin at the corner of the selected one.
+    // While creating, a press on a grip that never moved is an ordinary click: it places a point, so a new
+    // measurement can begin at the corner of the selected one. Unarmed, it is nothing at all.
     if (travelled <= CLICK_DRAG_THRESHOLD_PX) {
-      placePoint(ev.clientX, ev.clientY);
+      if (active) placePoint(ev.clientX, ev.clientY);
+      return;
+    }
+    // Released outside the 3D view (over the toolbar, a panel's edge or off the window): the move is cancelled, never resolved
+    // against whatever surface the ray happens to meet far away.
+    if (!insideCanvas(ev.clientX, ev.clientY)) {
+      setStatus('Move cancelled.');
       return;
     }
     // The release position decides: resolve it freshly instead of trusting the last frame's pick.
@@ -1029,6 +1148,7 @@ export function createMeasurementTool({
     window.removeEventListener('pointerup', onDragUp);
     window.removeEventListener('pointercancel', onDragCancel);
     drag = null;
+    syncInputListeners();
     updateCursor();
   }
 
@@ -1113,8 +1233,8 @@ export function createMeasurementTool({
   }
 
   function onKeyDownCapture(ev) {
-    if (!active) return;
-    if (ev.key !== 'Escape' && !['Shift', 'Control', 'Alt', 'Meta'].includes(ev.key)) keyboardModality = true;
+    if (!active && !selectedId && !drag) return;
+    if (active && ev.key !== 'Escape' && !['Shift', 'Control', 'Alt', 'Meta'].includes(ev.key)) keyboardModality = true;
     if (ev.defaultPrevented) return;
     if (UIComponents.modalOwnership && UIComponents.modalOwnership.blocksKeyboardEvent(ev)) return;
     if (!inEditor() || isTypingTarget(ev.target)) return;
@@ -1122,7 +1242,15 @@ export function createMeasurementTool({
     if (key === 'escape') {
       // A popover that owns Escape (the load-status popover) closes first; the next Escape exits.
       if (typeof els.escapeOwnedElsewhere === 'function' && els.escapeOwnedElsewhere()) return;
-      exitFromEscape(ev);
+      if (active) {
+        exitFromEscape(ev);
+        return;
+      }
+      // Creation is off: Escape drops a grip drag first, then the selection. Deleting stays on the manager's row.
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (drag) cancelDrag('Move cancelled.');
+      else clearSelection();
       return;
     }
     // Undo / Redo mid-gesture cancels only that gesture; cargo history is untouched.
@@ -1350,7 +1478,7 @@ export function createMeasurementTool({
     const pack = currentPack();
     if (!pack) return;
     const index = records.findIndex(record => record.id === id);
-    if (selectedId === id) selectedId = null;
+    if (selectedId === id) setSelected(null);
     if (renamingId === id) renamingId = null;
     if (drag && drag.id === id) cancelDrag();
     const outcome = PackLibrary.deleteMeasurement(pack.id, id);
@@ -1528,13 +1656,15 @@ export function createMeasurementTool({
       records = [];
       results = [];
       syncedPackId = null;
+      cancelDrag();
+      setSelected(null);
       if (active || managerOpen) closeManager();
       return;
     }
     records = PackLibrary.getMeasurements(pack);
     results = PackLibrary.resolveMeasurements(pack);
     syncedPackId = pack.id;
-    if (selectedId && !records.some(record => record.id === selectedId)) selectedId = null;
+    if (selectedId && !records.some(record => record.id === selectedId)) setSelected(null);
     if (renamingId && !records.some(record => record.id === renamingId)) renamingId = null;
     if (pending && !pendingStillValid(pack)) {
       cancelPending('The cargo for Point A changed, so the measurement was cancelled.');
@@ -1572,6 +1702,10 @@ export function createMeasurementTool({
     const show = PreferencesManager.get().showMeasurementTool !== false;
     toolShown = show;
     if (!show && (active || managerOpen)) closeManager();
+    if (!show) {
+      cancelDrag();
+      setSelected(null);
+    }
     if (els.button) els.button.hidden = !show;
     ensureLoop(); // showing the tool again brings its saved lines back; hiding it ends the view-only loop by itself
     return show;
@@ -1587,6 +1721,8 @@ export function createMeasurementTool({
           closeManager();
           return;
         }
+        cancelDrag();
+        setSelected(null);
         // Another Load Plan, a workspace swap or the Editor closing: the saved lines belong to the old one.
         if (syncedPackId !== null) {
           records = [];
@@ -1596,7 +1732,9 @@ export function createMeasurementTool({
         }
         return;
       }
-      if (!active && !managerOpen) return;
+      // Cargo selected (or its selection rewritten) by anything but this tool: a measurement selected from the scene steps aside.
+      if (selectedId && !selfClearing && Object.prototype.hasOwnProperty.call(changes, 'selectedInstanceIds')) clearSelection();
+      if (!active && !managerOpen && !drag) return;
       if (changes._undo || changes._redo) {
         if (drag) cancelDrag('Undo or redo cancelled the move.');
         cancelPending('Undo or redo cancelled the unfinished measurement.');
@@ -1604,7 +1742,7 @@ export function createMeasurementTool({
     });
     if (OperationLifecycle && typeof OperationLifecycle.subscribe === 'function') {
       OperationLifecycle.subscribe(() => {
-        if (active) syncBlocked();
+        if (active || drag) syncBlocked();
       });
     }
   }
@@ -1636,6 +1774,12 @@ export function createMeasurementTool({
     isManagerOpen: () => managerOpen,
     isActive: () => active,
     hasPending: () => Boolean(pending),
+    // Saved-record editing is separate from creation: the Editor selects a measurement on a click on its line, and asks who holds a grip drag.
+    select: selectMeasurement,
+    selectedId: () => selectedId,
+    clearSelection,
+    lineHitAt,
+    ownsPointer,
     onPointerDown,
     onPointerMove,
     onPointerCancel,

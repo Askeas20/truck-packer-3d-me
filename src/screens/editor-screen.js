@@ -2219,6 +2219,7 @@ export function createInteractionManager({
     let focusClickPackId = null;
     let hoveredId = null;
     let drawingHover = false; // the pointer is over a saved Drawing's line (grab cursor), which a plain press would take ahead of cargo
+    let lineHover = false; // the pointer is over a saved Arrow's shaft (pointer cursor): a plain click selects it ahead of cargo
     let pressed = null;
     let draggingId = null;
     let gizmoDragging = false;
@@ -2906,12 +2907,36 @@ export function createInteractionManager({
       }
     }
 
+    function hoverCursor() {
+      if (hoveredId || drawingHover) return 'grab';
+      return lineHover ? 'pointer' : 'default';
+    }
+
+    /**
+     * The saved scene line (an Arrow's shaft or a Measurement's line or label) a plain primary pointer is on, or null. Selecting one is a click, never a press: nothing
+     * here claims the pointer, so a drag that starts on the line is still the camera drag or the cargo drag it would have been. Shift,
+     * Ctrl and Cmd are camera navigation, the other buttons orbit and pan, and a second finger is a pinch.
+     */
+    function savedLineAt(ev, { hover = false } = {}) {
+      if (!ev || (!hover && ev.button !== 0) || ev.isPrimary === false || ev.shiftKey || ev.ctrlKey || ev.metaKey) return null;
+      const arrow = AnnotationTool && typeof AnnotationTool.arrowHitAt === 'function' ? AnnotationTool.arrowHitAt(ev.clientX, ev.clientY, ev.pointerType) : null;
+      const measurement = MeasurementTool && typeof MeasurementTool.lineHitAt === 'function' ? MeasurementTool.lineHitAt(ev.clientX, ev.clientY, ev.pointerType) : null;
+      if (!arrow && !measurement) return null;
+      // The nearer line wins where they cross (an Arrow on a tie: it is painted above).
+      if (measurement && (!arrow || measurement.distance < arrow.distance)) {
+        return { id: measurement.id, pointerId: ev.pointerId, select: () => MeasurementTool.select(measurement.id) };
+      }
+      return { id: arrow.id, pointerId: ev.pointerId, select: () => AnnotationTool.select(arrow.id) };
+    }
+
     function onMove(ev) {
       if (!isEditorActive()) return;
       // Measurement Mode owns the pointer: no hover, drag or gizmo handling. OrbitControls is separate.
       if (MeasurementTool && MeasurementTool.isActive()) { MeasurementTool.onPointerMove(ev); return; }
       // The armed Annotations tool (Callout, Re-attach) owns the pointer the same way.
       if (AnnotationTool && AnnotationTool.isActive()) { AnnotationTool.onPointerMove(ev); return; }
+      // A selected measurement's grip drag (no creation mode) is that tool's until the pointer lifts.
+      if (MeasurementTool && typeof MeasurementTool.ownsPointer === 'function' && MeasurementTool.ownsPointer(ev)) return;
       // A press a saved Drawing's line took is that Drawing's until the pointer lifts: no cargo hover, drag or cursor meanwhile.
       if (AnnotationTool && typeof AnnotationTool.ownsPointer === 'function' && AnnotationTool.ownsPointer(ev)) return;
       updatePointer(ev);
@@ -2939,13 +2964,16 @@ export function createInteractionManager({
 
       // A saved Drawing's line is ahead of cargo for a plain press, so it is ahead of it for hover too.
       const overDrawing = Boolean(AnnotationTool && typeof AnnotationTool.hoverDrawing === 'function' && AnnotationTool.hoverDrawing(ev));
-      const hit = overDrawing ? null : raycastFirst();
+      // So is a saved Arrow's shaft for a plain click (touch has no hover).
+      const overLine = !overDrawing && ev.pointerType !== 'touch' && Boolean(savedLineAt(ev, { hover: true }));
+      const hit = (overDrawing || overLine) ? null : raycastFirst();
       const nextHover = hit ? hit.instanceId : null;
-      if (nextHover !== hoveredId || overDrawing !== drawingHover) {
+      if (nextHover !== hoveredId || overDrawing !== drawingHover || overLine !== lineHover) {
         hoveredId = nextHover;
         drawingHover = overDrawing;
+        lineHover = overLine;
         CaseScene.setHover(hoveredId);
-        domEl.style.cursor = (hoveredId || drawingHover) ? 'grab' : 'default';
+        domEl.style.cursor = hoverCursor();
       }
     }
 
@@ -2973,6 +3001,8 @@ export function createInteractionManager({
       }
 
       const hit = raycastFirst();
+      // Only remembered: a release that has not moved selects this line (see onUp); anything else is the ordinary press below.
+      const line = savedLineAt(ev);
 
       if (hit) {
         const instanceId = hit.instanceId;
@@ -2982,6 +3012,7 @@ export function createInteractionManager({
           clientX: ev.clientX,
           clientY: ev.clientY,
           shift: Boolean(ev.shiftKey),
+          line,
         };
         domEl.setPointerCapture(ev.pointerId);
         domEl.style.cursor = 'grabbing';
@@ -2991,6 +3022,7 @@ export function createInteractionManager({
           clientX: ev.clientX,
           clientY: ev.clientY,
           shift: Boolean(ev.shiftKey),
+          line,
         };
       }
     }
@@ -3017,6 +3049,18 @@ export function createInteractionManager({
           return;
         }
         finishDrag();
+        return;
+      }
+
+      // A click on a saved Arrow's shaft or Measurement line selects it ahead of the cargo or the empty ground under it. It must be the same pointer, released
+      // without moving past the click threshold; selecting writes no history and clears the cargo selection (the tool's own rule).
+      if (pressed.line && !pressed.shift && ev && ev.pointerId === pressed.line.pointerId &&
+        Math.hypot(ev.clientX - pressed.clientX, ev.clientY - pressed.clientY) <= CLICK_DRAG_THRESHOLD_PX) {
+        const line = pressed.line;
+        pressed = null;
+        lineHover = true;
+        domEl.style.cursor = hoverCursor();
+        line.select();
         return;
       }
 
@@ -3899,7 +3943,7 @@ export function createInteractionManager({
       dragGroupPreviewBlocked = false;
       surfaceFollowingDrag = false;
       pressed = null;
-      domEl.style.cursor = (hoveredId || drawingHover) ? 'grab' : 'default';
+      domEl.style.cursor = hoverCursor();
       CaseScene.setDragging(null);
     }
 
@@ -3969,6 +4013,7 @@ export function createInteractionManager({
     function resetHover() {
       hoveredId = null;
       drawingHover = false;
+      lineHover = false;
       CaseScene.setHover(null);
       if (domEl) domEl.style.cursor = 'default';
     }
@@ -5310,6 +5355,13 @@ export function createEditorScreen({
           escapeOwnedElsewhere: () => validationPopoverOpen,
           // A live drag, gizmo stroke or held case displays cargo away from its committed pose.
           hasProvisionalPose: () => Boolean(InteractionManager && InteractionManager.hasProvisionalPose && InteractionManager.hasProvisionalPose()),
+          // Selecting a saved measurement replaces the cargo and annotation selections (so Delete never reaches cargo through it).
+          clearOtherSelections: () => {
+            if (InteractionManager && typeof InteractionManager.setSelection === 'function') InteractionManager.setSelection([]);
+            if (AnnotationTool) AnnotationTool.select(null);
+          },
+          // An armed Callout, Arrow or Draw keeps the canvas: a selected measurement's grips take no press meanwhile.
+          isAnnotationToolActive: () => Boolean(AnnotationTool && AnnotationTool.isActive()),
         });
         btnMeasure.addEventListener('click', ev => {
           ev.stopPropagation();
@@ -5317,7 +5369,8 @@ export function createEditorScreen({
           // The toolbar button shows or hides the Measurements manager. It never starts a measurement: that is the panel's
           // New Measurement control. The Annotations panel is left alone, so both managers can be open.
           if (MeasurementTool.isManagerOpen()) {
-            MeasurementTool.closeManager();
+            // Closing the manager ends creation but keeps a selected measurement selected and editable.
+            MeasurementTool.closeManager({ keepSelection: true });
           } else {
             if (!PackLibrary.getById(StateStore.get('currentPackId'))) {
               UIComponents.showToast(NO_LOAD_PLAN_MESSAGE, 'warning', { title: 'Measurements' });
@@ -5345,6 +5398,8 @@ export function createEditorScreen({
           hasProvisionalPose: () => Boolean(InteractionManager && InteractionManager.hasProvisionalPose && InteractionManager.hasProvisionalPose()),
           // Selecting an annotation clears the cargo selection (so Delete never touches cargo).
           clearCargoSelection: () => { if (InteractionManager && typeof InteractionManager.setSelection === 'function') InteractionManager.setSelection([]); },
+          // Selecting an annotation (or arming a creator) also drops a saved measurement's selection.
+          clearMeasurementSelection: () => { if (MeasurementTool) MeasurementTool.clearSelection(); },
           // A read-only question: does Measurement Mode own the scene's gestures right now? Saved callouts stay
           // drawn but take no input while it does.
           isSceneToolOwnedElsewhere: () => Boolean(MeasurementTool && MeasurementTool.isActive()),

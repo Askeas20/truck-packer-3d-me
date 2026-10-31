@@ -7368,3 +7368,232 @@ test('a custom arrow color is one undo step: input events only preview, one chan
   assert.equal(await page.evaluate(() => window.probe.annotations().length), 1, 'the undo that follows is the color step, not the cancelled one');
   assert.deepEqual(errors, []);
 });
+
+// ---- Scene selection parity: a saved Arrow is selected by clicking its visible shaft -------------------------------
+// Real pointer input only (no synthetic pointer IDs). The shaft stays a non-target in the DOM (`pointer-events: none`):
+// the Editor hit-tests the projected line itself and only a plain click selects, so a drag still orbits or moves cargo.
+const ARROW_MID = [180, 0, 75];
+const shaftMid = page => point(page, ...ARROW_MID);
+const arrowSelected = page => page.evaluate(() => window.probe.AnnotationTool.selectedId());
+const undoDepth = page => page.evaluate(() => window.probe.StateStore.undoDepth());
+// The two managers are independent toggles; this puts them in the wanted state and lets the camera and layout settle.
+const setManagers = async (page, { annotations, measurements }) => {
+  for (const [id, want] of [['btn-editor-annotations', annotations], ['btn-editor-measure', measurements]]) {
+    const open = await page.evaluate(sel => document.getElementById(sel).getAttribute('aria-pressed') === 'true', id);
+    if (open !== want) await page.click(`#${id}`);
+    await page.waitForFunction(([sel, wanted]) => (document.getElementById(sel).getAttribute('aria-pressed') === 'true') === wanted, [id, want]);
+  }
+  await cameraSettled(page);
+  await frames(page, 3);
+};
+const reachedCanvas = (page, at) => page.evaluate(({ x, y }) => document.elementFromPoint(x, y) === document.querySelector('#viewport canvas'), at);
+// A point `distance` screen pixels from the middle of the Arrow, straight across it.
+const offShaft = async (page, distance) => {
+  const a = await point(page, GROUND_A[0], 0, GROUND_A[2]);
+  const b = await point(page, GROUND_B[0], 0, GROUND_B[2]);
+  const mid = await shaftMid(page);
+  const length = Math.hypot(b.x - a.x, b.y - a.y);
+  return { x: mid.x + (-(b.y - a.y) / length) * distance, y: mid.y + ((b.x - a.x) / length) * distance };
+};
+
+test('a click on the saved Arrow shaft selects it with the managers closed, with either one open and with both open, while a drag from it still orbits: selection writes no history, keeps Redo, and shows both end grips', { timeout: 300000 }, async t => {
+  const browser = await launch();
+  t.after(() => browser.close());
+  const { page, errors } = await openEditor(browser);
+  const arrow = await seedArrow(page, [GROUND_A[0], GROUND_A[2]], [GROUND_B[0], GROUND_B[2]]);
+  await page.waitForFunction(() => window.probe.annotations().length === 1);
+  // Redo must survive every selection below: one real edit, undone, leaves one step to redo.
+  await page.evaluate(id => window.probe.PackLibrary.updateArrow('fixture-pack', id, { style: 'dotted' }), arrow.id);
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+  const recordBefore = JSON.stringify(await page.evaluate(() => window.probe.annotations()));
+  const casesBefore = await page.evaluate(() => window.probe.casesJson());
+  const depthBefore = await undoDepth(page);
+
+  // A drag that starts on the shaft of an unselected Arrow is the ordinary camera drag: nothing is selected or moved.
+  const cameraBefore = await page.evaluate(() => window.probe.camera());
+  await orbit(page, await shaftMid(page), 0, 60);
+  assert.notEqual(await page.evaluate(() => window.probe.camera()), cameraBefore, 'the camera orbited');
+  assert.equal(await arrowSelected(page), null, 'a drag from the shaft selects nothing');
+  assert.equal(JSON.stringify(await page.evaluate(() => window.probe.annotations())), recordBefore, 'and moves nothing');
+
+  for (const [label, managers] of [
+    ['both managers closed', { annotations: false, measurements: false }],
+    ['the Annotations panel open', { annotations: true, measurements: false }],
+    ['the Measurements manager open', { annotations: false, measurements: true }],
+    ['both managers open', { annotations: true, measurements: true }],
+  ]) {
+    await setManagers(page, managers);
+    const at = await shaftMid(page);
+    assert.equal(await reachedCanvas(page, at), true, `${label}: the shaft is over the canvas, not a panel`);
+    assert.equal(await arrowSelected(page), null, `${label}: nothing is selected yet`);
+    await click(page, at);
+    await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+    await page.waitForFunction(() => document.querySelectorAll('.tp3d-annot-handle:not([hidden])').length === 2);
+    assert.deepEqual((await gripsShown(page)).map(grip => grip.end), ['start', 'end'], `${label}: both end grips are shown`);
+    assert.equal(await page.evaluate(() => window.probe.AnnotationTool.isActive()), false, `${label}: selecting arms nothing`);
+    assert.deepEqual(await page.evaluate(() => window.probe.selection()), [], `${label}: cargo is not selected`);
+    assert.equal(await undoDepth(page), depthBefore, `${label}: selecting is not a history step`);
+    assert.equal(JSON.stringify(await page.evaluate(() => window.probe.annotations())), recordBefore, `${label}: the record is untouched`);
+    assert.equal(await page.evaluate(() => window.probe.casesJson()), casesBefore, `${label}: cargo is untouched`);
+    // Escape clears it; the next state starts from nothing again.
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.probe.AnnotationTool.selectedId() === null);
+  }
+  assert.equal(await page.evaluate(() => window.probe.StateStore.redo()), true, 'Redo survived every selection');
+  assert.equal((await page.evaluate(() => window.probe.annotations()))[0].style, 'dotted', 'and replays the undone edit');
+  assert.deepEqual(errors, []);
+});
+
+test('an Arrow lying on cargo: a click on the shaft selects the Arrow and not the cargo, while a drag from the same spot still moves the cargo and selects nothing; a creation tool keeps the click for itself', { timeout: 300000 }, async t => {
+  const browser = await launch();
+  t.after(() => browser.close());
+  const { page, errors } = await openEditor(browser);
+  const arrow = await seedArrow(page, { cargo: 'cargo-a', local: { x: -12, y: 16, z: 0 } }, { cargo: 'cargo-a', local: { x: 12, y: 16, z: 0 } });
+  await page.waitForFunction(() => window.probe.annotations().length === 1);
+  await cameraSettled(page);
+  await frames(page, 3);
+  // The middle of the drawn shaft, from the path the overlay itself draws (layer pixels, offset by the layer's own position).
+  const drawnMid = () => page.evaluate(() => {
+    const path = document.querySelector('.tp3d-annot-arrow:not(.is-preview) .tp3d-annot-arrow__shaft');
+    const n = path.getAttribute('d').match(/-?\d+(\.\d+)?/g).map(Number);
+    const layer = document.querySelector('.tp3d-annot-svg').getBoundingClientRect();
+    return { x: layer.left + (n[0] + n[n.length - 2]) / 2, y: layer.top + (n[1] + n[n.length - 1]) / 2 };
+  });
+  const at = await drawnMid();
+  assert.equal(await reachedCanvas(page, at), true, 'the shaft is over the canvas');
+  const casesBefore = await page.evaluate(() => window.probe.casesJson());
+  const depth = await undoDepth(page);
+
+  await click(page, at);
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+  assert.deepEqual(await page.evaluate(() => window.probe.selection()), [], 'the cargo underneath is not selected');
+  assert.equal(await page.evaluate(() => window.probe.casesJson()), casesBefore);
+  assert.equal(await undoDepth(page), depth);
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.probe.AnnotationTool.selectedId() === null);
+
+  // The same press, moved: that is the cargo drag it always was.
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down();
+  await page.mouse.move(at.x + 50, at.y + 30, { steps: 8 });
+  await page.mouse.up();
+  await cameraSettled(page);
+  assert.notEqual(await page.evaluate(() => window.probe.casesJson()), casesBefore, 'the drag moved the cargo');
+  assert.equal(await arrowSelected(page), null, 'and did not select the Arrow');
+  assert.equal(await undoDepth(page), depth + 1, 'as one step');
+
+  // With a creation tool armed, a click belongs to that tool and is never a selection.
+  await setManagers(page, { annotations: true, measurements: false });
+  await armArrow(page);
+  await cameraSettled(page);
+  const armedAt = await drawnMid();
+  assert.equal(await reachedCanvas(page, armedAt), true);
+  await click(page, armedAt);
+  assert.equal(await arrowSelected(page), null, 'an armed tool never selects a saved Arrow');
+  assert.equal(await tailShown(page), true, 'the click placed the new Arrow tail instead');
+  assert.deepEqual(errors, []);
+});
+
+test('Arrow selection is exclusive and Delete-safe: it replaces a cargo selection, a Drawing selection replaces it, a cargo click clears it, and Delete removes only the selected Arrow', { timeout: 300000 }, async t => {
+  const browser = await launch();
+  t.after(() => browser.close());
+  const { page, errors } = await openEditor(browser);
+  const arrow = await seedArrow(page, [GROUND_A[0], GROUND_A[2]], [GROUND_B[0], GROUND_B[2]]);
+  const drawing = await seedDraw(page, { ground: [300, 70], rest: [330, 74, 360, 80, 390, 72] });
+  await page.waitForFunction(() => window.probe.annotations().length === 2);
+  await cameraSettled(page);
+  const cargoIds = await page.evaluate(() => window.probe.cargoIds());
+
+  // Cargo selected, then the Arrow: one selection only, and it is the Arrow.
+  await click(page, await page.evaluate(() => window.probe.cargoPoint('cargo-b')));
+  await page.waitForFunction(() => window.probe.selection().join() === 'cargo-b');
+  await click(page, await shaftMid(page));
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+  assert.deepEqual(await page.evaluate(() => window.probe.selection()), [], 'selecting the Arrow clears the cargo selection');
+  // A Drawing selected next replaces the Arrow.
+  await click(page, await point(page, 315, 0, 72));
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, drawing.id);
+  assert.equal((await gripsShown(page)).length, 0, 'the Arrow lost its grips');
+  // And a click on the Arrow replaces the Drawing.
+  await click(page, await shaftMid(page));
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+  // Cargo clicked: the Arrow is deselected.
+  await click(page, await page.evaluate(() => window.probe.cargoPoint('cargo-b')));
+  await page.waitForFunction(() => window.probe.selection().join() === 'cargo-b');
+  assert.equal(await arrowSelected(page), null, 'a cargo click deselects the Arrow');
+
+  // Delete with the Arrow selected removes the Arrow and never a cargo.
+  await click(page, await shaftMid(page));
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+  await page.focus('#viewport');
+  await page.keyboard.press('Delete');
+  await page.waitForFunction(() => window.probe.annotations().length === 1);
+  assert.equal(await page.evaluate(id => window.probe.annotations().some(r => r.id === id), arrow.id), false, 'the Arrow was deleted');
+  assert.deepEqual(await page.evaluate(() => window.probe.cargoIds()), cargoIds, 'no cargo was deleted');
+  assert.deepEqual(errors, []);
+});
+
+test('a touch tap on the saved Arrow shaft selects it, with the wider touch reach', { timeout: 300000 }, async t => {
+  const browser = await launch();
+  t.after(() => browser.close());
+  const touch = { newPage: async options => (await browser.newContext({ ...options, hasTouch: true })).newPage() };
+  const { page, errors } = await openEditor(touch);
+  const arrow = await seedArrow(page, [GROUND_A[0], GROUND_A[2]], [GROUND_B[0], GROUND_B[2]]);
+  await page.waitForFunction(() => window.probe.annotations().length === 1);
+  await cameraSettled(page);
+  const depth = await undoDepth(page);
+  const record = JSON.stringify(await page.evaluate(() => window.probe.annotations()));
+
+  const far = await offShaft(page, 30);
+  await page.touchscreen.tap(far.x, far.y);
+  await frames(page, 3);
+  assert.equal(await arrowSelected(page), null, 'a tap 30 px away selects nothing');
+  const near10 = await offShaft(page, 10);
+  await page.touchscreen.tap(near10.x, near10.y);
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+  assert.deepEqual((await gripsShown(page)).map(grip => grip.end), ['start', 'end'], 'a tap 10 px away is inside the touch reach');
+  assert.equal(await undoDepth(page), depth, 'a tap is not a history step');
+  assert.equal(JSON.stringify(await page.evaluate(() => window.probe.annotations())), record);
+  await click(page, await point(page, 400, 0, 130));
+  await page.waitForFunction(() => window.probe.AnnotationTool.selectedId() === null);
+  assert.deepEqual(errors, []);
+});
+
+test('a saved Measurement selected from the scene and the Arrow, cargo and Annotation selections replace each other, and Delete never reaches cargo through the Measurement', { timeout: 240000 }, async t => {
+  const browser = await launch();
+  t.after(() => browser.close());
+  const { page, errors } = await openEditor(browser);
+  const arrow = await seedArrow(page, [GROUND_A[0], GROUND_A[2]], [GROUND_B[0], GROUND_B[2]]);
+  await page.evaluate(() => {
+    const { M, PackLibrary } = window.probe;
+    const at = (x, z) => M.buildSpaceAnchor({ surface: 'ground', point: { x, y: 0, z } });
+    if (!PackLibrary.addMeasurement('fixture-pack', { start: at(100, 110), end: at(260, 120) }).ok) throw new Error('measurement seed failed');
+  });
+  await page.waitForFunction(() => document.querySelectorAll('.tp3d-measure-svg__segment').length === 1);
+  await cameraSettled(page);
+  const measSelected = () => page.evaluate(() => window.probe.MeasurementTool.selectedId());
+  const measAt = () => point(page, 180, 0, 115);
+  const cargoIds = await page.evaluate(() => window.probe.cargoIds());
+
+  await click(page, await page.evaluate(() => window.probe.cargoPoint('cargo-b')));
+  await page.waitForFunction(() => window.probe.selection().join() === 'cargo-b');
+  await click(page, await measAt());
+  await page.waitForFunction(() => window.probe.MeasurementTool.selectedId() !== null);
+  assert.deepEqual(await page.evaluate(() => window.probe.selection()), [], 'selecting the Measurement cleared the cargo selection');
+  await page.focus('#viewport');
+  await page.keyboard.press('Delete');
+  await frames(page, 4);
+  assert.deepEqual(await page.evaluate(() => window.probe.cargoIds()), cargoIds, 'Delete did not remove cargo');
+  assert.equal(await page.evaluate(() => window.probe.PackLibrary.getMeasurements('fixture-pack').length), 1, 'nor the Measurement');
+
+  await click(page, await shaftMid(page));
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+  assert.equal(await measSelected(), null, 'selecting the Arrow dropped the Measurement selection');
+  await click(page, await measAt());
+  await page.waitForFunction(() => window.probe.MeasurementTool.selectedId() !== null);
+  assert.equal(await arrowSelected(page), null, 'selecting the Measurement dropped the Arrow selection');
+  await click(page, await page.evaluate(() => window.probe.cargoPoint('cargo-b')));
+  await page.waitForFunction(() => window.probe.selection().join() === 'cargo-b');
+  assert.equal(await measSelected(), null, 'selecting cargo dropped the Measurement selection');
+  assert.deepEqual(errors, []);
+});

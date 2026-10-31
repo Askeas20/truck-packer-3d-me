@@ -102,6 +102,7 @@ import {
   clampRect,
   clipSegmentToConvex,
   clipSegmentToNear,
+  distanceToPolyline,
   estimateCardHeight,
   fitEditorClear,
   fitLabels,
@@ -555,6 +556,8 @@ export function createAnnotationTool({
   }
 
   function clearCargoSelection() {
+    // Only one scene object or cargo selection at a time: a saved measurement selected from the scene steps aside too.
+    if (typeof els.clearMeasurementSelection === 'function') els.clearMeasurementSelection();
     if (typeof els.clearCargoSelection !== 'function') return;
     selfClearing = true;
     try {
@@ -908,6 +911,7 @@ export function createAnnotationTool({
     hoverDirty = true;
     press = null;
     selectedId = tool ? null : selectedId;
+    if (tool && typeof els.clearMeasurementSelection === 'function') els.clearMeasurementSelection();
     setStatus('', { sticky: true });
     applyViewGate();
     updateCursor();
@@ -2534,6 +2538,28 @@ export function createAnnotationTool({
   /** Whether the pointer is one whose press a saved stroke took and has not yet let go: the Editor's hover and cargo handling leave it alone. */
   function ownsPointer(ev) {
     return Boolean(heldPointer && ev && ev.pointerId === heldPointer.pointerId);
+  }
+
+  /**
+   * The saved Arrow whose drawn shaft is nearest a client position, within the pointer's reach: `{ id, distance }` in screen pixels, or
+   * null. A pure query on the line the overlay painted last frame, so nothing is projected here. Only an Arrow drawn in front (the
+   * dashed, occluded ones are not taken) and only while the scene is free: no armed tool, re-attach, open editor, drag or other tool
+   * (the same condition a saved stroke needs). It never claims a press: the Editor selects an Arrow on a click, and a drag that
+   * starts on the shaft stays the camera drag or cargo drag it was.
+   */
+  function arrowHitAt(clientX, clientY, pointerType = 'mouse') {
+    if (!arrowViews.size || !els.layer || !drawHitWanted()) return null;
+    const rect = els.layer.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const reach = DRAW_HIT_REACH_PX[pointerType] || DRAW_HIT_REACH_PX.mouse;
+    let best = null;
+    arrowViews.forEach((view, id) => {
+      if (!view.shown || !view.front || !view.tail || !view.head) return;
+      const distance = distanceToPolyline([view.tail.x, view.tail.y, view.head.x, view.head.y], x, y);
+      if (distance <= reach && (!best || distance < best.distance)) best = { id, distance };
+    });
+    return best;
   }
 
   /** Whether the pointer is over a stroke's line that a plain press would take (for the grab cursor); touch has no hover. */
@@ -4435,7 +4461,7 @@ export function createAnnotationTool({
         els.layer.appendChild(el);
         grips[which] = { el, key: '' };
       });
-      view = { id, graphic, grips, startWorld: new THREE.Vector3(), endWorld: new THREE.Vector3(), front: true, measured: false, shown: false };
+      view = { id, graphic, grips, startWorld: new THREE.Vector3(), endWorld: new THREE.Vector3(), front: true, measured: false, shown: false, tail: null, head: null };
       arrowViews.set(id, view);
       visDirty = true;
     }
@@ -4550,6 +4576,9 @@ export function createAnnotationTool({
       const selected = isSelected;
       paintArrow(view.graphic, projection.shape, { color: paintColorOf(record), style: lineStyleOf(record), selected, occluded: !view.front });
       view.shown = true;
+      // Kept for the Editor's click test: the layer pixels of the shaft exactly as it was just painted.
+      view.tail = projection.tail;
+      view.head = projection.head;
       ['start', 'end'].forEach(which => {
         const screen = which === 'start' ? projection.tail : projection.head;
         const clipped = which === 'start' ? projection.tailClipped : projection.headClipped;
@@ -5451,6 +5480,9 @@ export function createAnnotationTool({
     claimPress,
     ownsPointer,
     hoverDrawing,
+    // A saved Arrow has no pointer target of its own: the Editor asks which one a click is on, then selects it.
+    arrowHitAt,
+    select,
     onPointerDown,
     onPointerMove,
     onPointerCancel,
