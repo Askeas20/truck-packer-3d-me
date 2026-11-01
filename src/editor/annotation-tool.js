@@ -15,8 +15,8 @@
  *     cargo is; the layer only projects what the scene displays.
  *   - Only one scene tool owns pointer input. While the Callout or Arrow tool (or a re-attach) is armed the
  *     Editor's pointer handlers delegate here instead of selecting or dragging cargo; OrbitControls is
- *     untouched, so orbit, pan and zoom stay available. The Measurement Tool and Annotations are mutually
- *     exclusive (the Editor wires that). Markers and cards are ordinary DOM, so clicking them never reaches
+ *     untouched, so orbit, pan and zoom stay available. The Measurement Tool and Annotations managers are
+ *     independent, but only one tool owns scene gestures at a time (the Editor wires that). Markers and cards are ordinary DOM, so clicking them never reaches
  *     the canvas.
  *   - Selecting an annotation clears the cargo selection and selecting cargo clears the annotation, so
  *     Delete acts on the annotation only when it owns the selection and never deletes cargo as a side
@@ -30,7 +30,8 @@
  *     handlers (cargo deselection, drawers).
  *   - An arrow is two surface anchors drawn as an SVG shaft and head in this same layer (never a Three.js
  *     object, so no capture can include it). It is drawn only while both ends resolve and it is long enough
- *     to read; its ends move only by the owner's grip drag or Re-attach. Placing one takes two clicks (tail,
+ *     to read; its ends move by the owner's grip drag or Re-attach, or together when the body of the SELECTED arrow is dragged
+ *     (both ends on one physical surface only; anything else refuses the whole move). Placing one takes two clicks (tail,
  *     then head): the first click is an unsaved gesture that Escape, closing the panel, Show Off, an
  *     operation, Measurement Mode, a Load Plan change or a cargo pose change all drop without writing.
  *   - A freehand drawing is one polyline on one flat face or convex patch, stored as one record and drawn as SVG paths in this
