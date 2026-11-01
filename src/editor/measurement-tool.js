@@ -29,7 +29,9 @@
  *     with nothing selected no pointer or keyboard ownership and no write of any kind. Editing a saved record
  *     does not need creation: the Editor selects one on a click on its line or label (lineHitAt/select; a drag
  *     that starts there stays the camera or cargo drag), the selected measurement shows grips, and a press on a
- *     grip is claimed in the capture phase and dragged through the same endpoint writer. Selecting one replaces
+ *     grip is claimed in the capture phase and dragged through the same endpoint writer. The body (line or label) of the
+ *     SELECTED measurement drags the whole measurement when both ends sit on one physical surface (core/measurements.js
+ *     rigidMoveFrame); anything else refuses the whole move and writes nothing. Selecting one replaces
  *     any cargo or annotation selection (and the reverse), so Delete never reaches cargo through it. A drag
  *     released off the canvas, Escape, Undo, an unchanged or rejected target all write nothing. The capture
  *     listeners exist only while armed, selected or dragging. The view follows cargo,
