@@ -65,6 +65,8 @@ import {
   measureBetween,
   measurementStatusLabel,
   resolveAnchor,
+  rigidMoveFrame,
+  translateAnchorPair,
 } from '../core/measurements.js';
 import { createSurfacePicker } from './surface-picker.js';
 
@@ -93,6 +95,12 @@ const ENDPOINT_CLICK_ZONE_PX = 14;
 const PANEL_MARGIN_PX = 10;
 const PANEL_DRAG_THRESHOLD_PX = 5;
 const HELD_POSE_NOTICE = 'Place or cancel the held case before measuring on cargo.';
+const BODY_MOVE_TEXT = Object.freeze({
+  ok: 'Release to move the whole measurement here. Esc cancels.',
+  off: 'Part of the measurement would leave its surface. Release to leave it where it was, or press Esc.',
+});
+const BODY_MOVE_REFUSED = 'The whole measurement has to stay on its surface, so it was left where it was.';
+const BODY_MOVE_UNSUPPORTED = 'The ends of this measurement are on different surfaces, so it can only be moved one end at a time. Drag a grip.';
 const AMBIGUOUS_CARGO_NOTICE = 'This cargo shares its ID with another item in the Load Plan, so it cannot be measured.';
 // Why a pick that landed on cargo was refused (set on the pick outcome); each has its own message.
 const PICK_REFUSAL_NOTICE = { provisional: HELD_POSE_NOTICE, ambiguous: AMBIGUOUS_CARGO_NOTICE };
@@ -501,8 +509,9 @@ export function createMeasurementTool({
         return;
       }
       const dragging = drag && drag.id === record.id;
-      if (dragging) {
-        // Subtle ghost of where the endpoint was, then the live preview with the new distance.
+      const carried = dragging && drag.which === 'body';
+      if (dragging && (!carried || drag.moved)) {
+        // Subtle ghost of where the endpoint (or the whole measurement) was, then the live preview with the new distance.
         const ghostA = liveAnchorWorld(record.start, result.start, scratchC);
         const ghostB = liveAnchorWorld(record.end, result.end, scratchD);
         if (ghostA && ghostB) {
@@ -510,7 +519,15 @@ export function createMeasurementTool({
           drawSegment(ghostVisual, ghostA, ghostB, '', camera, width, height);
           ghostDrawn = true;
         }
-        if (drag.candidate) (drag.which === 'start' ? a : b).copy(drag.candidate.world);
+        if (carried) {
+          // Both ends at the live offset: the shifted anchors, from the same pure move the write uses.
+          if (drag.pair) {
+            liveAnchorWorld(drag.pair.start, drag.pair.start.kind === 'cargo' ? null : drag.pair.start.position, a);
+            liveAnchorWorld(drag.pair.end, drag.pair.end.kind === 'cargo' ? null : drag.pair.end.position, b);
+          }
+        } else if (drag.candidate) {
+          (drag.which === 'start' ? a : b).copy(drag.candidate.world);
+        }
       }
       const inches = measureBetween(worldVectorToInches(a), worldVectorToInches(b)).distance;
       const selected = record.id === selectedId || dragging;
@@ -667,7 +684,9 @@ export function createMeasurementTool({
       // grip drag; the Editor's own hover handles the cursor, so only a drag sets it here.
       if (drag) {
         const blocked = syncBlocked();
-        if (drag && drag.dirty && lastClient) {
+        if (drag && drag.which === 'body') {
+          advanceBodyMove();
+        } else if (drag && drag.dirty && lastClient) {
           drag.dirty = false;
           drag.candidate = blocked || !insideCanvas(lastClient.x, lastClient.y) ? null : pick(lastClient.x, lastClient.y);
         }
@@ -1068,20 +1087,46 @@ export function createMeasurementTool({
     const canvas = getCanvas();
     if (!canvas || ev.target !== canvas) return;
     const which = gripAt({ x: ev.clientX, y: ev.clientY });
-    if (!which) return;
+    if (which) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      beginDrag(which, ev);
+      return;
+    }
+    // Unarmed, the body (line or label) of the SELECTED measurement carries the whole measurement. A grip, above, wins; a measurement
+    // that is not selected takes no press (the Editor selects it on a click), and an armed tool keeps its own gestures.
+    if (active) return;
+    const hit = lineHitAt(ev.clientX, ev.clientY, ev.pointerType);
+    if (!hit || hit.id !== selectedId || !beginDrag('body', ev)) return;
     ev.stopPropagation();
     ev.preventDefault();
-    beginDrag(which, ev);
   }
 
+  /** @returns {boolean} whether a drag began */
   function beginDrag(which, ev) {
     const record = records.find(item => item.id === selectedId);
-    if (!record) return;
+    const result = results[records.indexOf(record)];
+    if (!record) return false;
     const pack = currentPack();
     drag = {
       id: record.id, which, pointerId: ev.pointerId, candidate: null, dirty: false, startX: ev.clientX, startY: ev.clientY,
       poseKeys: [cargoPoseKey(pack, record.start), cargoPoseKey(pack, record.end)],
     };
+    if (which === 'body') {
+      if (!pack || !result || result.status !== MEASUREMENT_STATUS.VALID) {
+        drag = null;
+        return false;
+      }
+      // Both ends move along the one surface they share, measured from the press position on that plane; no shared surface, no move.
+      const shared = rigidMoveFrame(record.start, record.end);
+      const surface = shared.ok && !provisionalPoseActive() ? picker.beginDrawSurface({ anchor: record.start, face: shared.face }, pack) : null;
+      const base = surface ? picker.sampleDrawPlane(surface, ev.clientX, ev.clientY) : null;
+      Object.assign(drag, {
+        shape: JSON.stringify([record.start, record.end]), packId: pack.id, surface, shared: shared.ok,
+        base: base && base.status === 'ok' ? { u: base.u, v: base.v } : null, moved: false, du: 0, dv: 0, valid: true, pair: null,
+      });
+      drag.movable = Boolean(drag.base);
+    }
     lastClient = { x: ev.clientX, y: ev.clientY };
     press = null;
     const canvas = getCanvas();
@@ -1096,12 +1141,109 @@ export function createMeasurementTool({
     updateCursor();
     // Grabbing a grip replaces any stale "saved/updated" message with the drag guidance.
     setStatus('', { sticky: true });
+    return true;
   }
 
   function onDragMove(ev) {
     if (!drag || ev.pointerId !== drag.pointerId) return;
+    if (drag.which === 'body') {
+      // The primary no longer held (the release was lost), or another button joined the press, ends the move.
+      if (ev.pointerType !== 'touch' && ev.buttons !== 1) {
+        cancelDrag('Move cancelled.');
+        return;
+      }
+      if (!drag.moved && Math.hypot(ev.clientX - drag.startX, ev.clientY - drag.startY) >= CLICK_DRAG_THRESHOLD_PX) {
+        drag.moved = true;
+        if (!drag.movable) notice(drag.shared ? 'This measurement cannot be moved right now.' : BODY_MOVE_UNSUPPORTED);
+      }
+    }
     lastClient = { x: ev.clientX, y: ev.clientY };
     drag.dirty = true;
+  }
+
+  /**
+   * Where the pointer is on the measurement's shared surface and whether the WHOLE measurement may sit there: the offset from the press,
+   * snapped to the grid, judged by the writer's own rule without writing. A pointer off the 3D view or a ray that misses the plane is a
+   * position the measurement cannot take.
+   */
+  function judgeBodyMove(d, x, y) {
+    if (!insideCanvas(x, y)) return { status: 'off', du: d.du, dv: d.dv, valid: false };
+    const sample = picker.sampleDrawPlane(d.surface, x, y);
+    if (sample.status === 'provisional') return { status: 'provisional' };
+    if (sample.status !== 'ok') return { status: 'off', du: d.du, dv: d.dv, valid: false };
+    const du = Math.round((sample.u - d.base.u) * 100) / 100 + 0;
+    const dv = Math.round((sample.v - d.base.v) * 100) / 100 + 0;
+    return { status: 'ok', du, dv, valid: Boolean(PackLibrary.checkMeasurementMove(d.packId, d.id, du, dv).ok) };
+  }
+
+  /** Each frame while the body is carried: the pointer's latest position is judged once, and the preview pair follows the offset. */
+  function advanceBodyMove() {
+    if (!drag || drag.which !== 'body' || !drag.moved || !drag.movable || !drag.dirty || !lastClient) return;
+    drag.dirty = false;
+    const judged = judgeBodyMove(drag, lastClient.x, lastClient.y);
+    if (judged.status === 'provisional') {
+      cancelDrag(HELD_POSE_NOTICE);
+      return;
+    }
+    const record = records.find(item => item.id === drag.id);
+    if (!record) return;
+    if (judged.du !== drag.du || judged.dv !== drag.dv || !drag.pair) {
+      drag.du = judged.du;
+      drag.dv = judged.dv;
+      drag.pair = translateAnchorPair(record.start, record.end, drag.du, drag.dv);
+    }
+    if (judged.valid !== drag.valid) {
+      drag.valid = judged.valid;
+      renderPanel();
+    }
+  }
+
+  /** Write the finished whole-measurement move, once, if everything it was measured against is still as it was; otherwise leave it. */
+  function finishBodyMove(finished, ev) {
+    if (!finished.moved || !finished.movable) return; // a still press does nothing; an unmovable one already said why
+    if (!insideCanvas(ev.clientX, ev.clientY)) {
+      setStatus('Move cancelled.');
+      return;
+    }
+    const pack = currentPack();
+    const index = records.findIndex(item => item.id === finished.id);
+    const record = records[index];
+    const result = results[index];
+    if (!pack || pack.id !== finished.packId || !record || !result || result.status !== MEASUREMENT_STATUS.VALID ||
+        JSON.stringify([record.start, record.end]) !== finished.shape) {
+      setStatus('The measurement changed, so the move was cancelled.');
+      return;
+    }
+    if ([record.start, record.end].some((anchor, i) => cargoPoseKey(pack, anchor) !== finished.poseKeys[i])) {
+      setStatus('The cargo changed, so the move was cancelled.');
+      return;
+    }
+    const reason = blockedReason();
+    if (reason) {
+      notice(blockedMessage(reason));
+      return;
+    }
+    // The release position decides, not the last frame's.
+    const judged = judgeBodyMove(finished, ev.clientX, ev.clientY);
+    if (judged.status === 'provisional') {
+      notice(HELD_POSE_NOTICE);
+      return;
+    }
+    if (judged.status !== 'ok' || !judged.valid) {
+      notice(BODY_MOVE_REFUSED);
+      return;
+    }
+    if (!judged.du && !judged.dv) {
+      setStatus('The measurement was left where it was.');
+      return;
+    }
+    const outcome = PackLibrary.moveMeasurement(pack.id, record.id, judged.du, judged.dv);
+    if (!outcome.ok) {
+      if (outcome.reason === 'invalid' || outcome.reason === 'unresolved') notice(BODY_MOVE_REFUSED);
+      else UIComponents.showToast('Could not move this measurement.', 'error', { title: 'Measurements' });
+      return;
+    }
+    setStatus(outcome.unchanged ? 'The measurement was left where it was.' : 'Measurement moved.', { tone: 'success' });
   }
 
   function onDragUp(ev) {
@@ -1111,6 +1253,10 @@ export function createMeasurementTool({
     const travelled = Math.hypot(ev.clientX - finished.startX, ev.clientY - finished.startY);
     endDrag();
     hoverDirty = true;
+    if (finished.which === 'body') {
+      finishBodyMove(finished, ev);
+      return;
+    }
     // While creating, a press on a grip that never moved is an ordinary click: it places a point, so a new
     // measurement can begin at the corner of the selected one. Unarmed, it is nothing at all.
     if (travelled <= CLICK_DRAG_THRESHOLD_PX) {
@@ -1584,7 +1730,7 @@ export function createMeasurementTool({
   function guidanceText(blockedNow) {
     if (blockedNow) return blockedMessage(blockedNow);
     if (statusMessage) return statusMessage;
-    if (drag) return 'Drag to a new position. Esc cancels.';
+    if (drag) return drag.which === 'body' ? (drag.valid ? BODY_MOVE_TEXT.ok : BODY_MOVE_TEXT.off) : 'Drag to a new position. Esc cancels.';
     if (pending) return 'Click the second point. Esc cancels.';
     if (records.length >= MAX_MEASUREMENTS_PER_PACK) return `Limit of ${MAX_MEASUREMENTS_PER_PACK} measurements reached. Delete one to add another.`;
     if (!active) return records.length ? '' : 'No measurements yet. Choose New measurement to add one.';
@@ -1676,6 +1822,7 @@ export function createMeasurementTool({
       } else {
         const poseKeys = [cargoPoseKey(pack, records[index].start), cargoPoseKey(pack, records[index].end)];
         if (poseKeys.some((key, i) => key !== drag.poseKeys[i])) cancelDrag('The cargo changed, so the move was cancelled.');
+        else if (drag.shape && JSON.stringify([records[index].start, records[index].end]) !== drag.shape) cancelDrag('The measurement changed, so the move was cancelled.');
       }
     }
     if (active || managerOpen) renderPanel();

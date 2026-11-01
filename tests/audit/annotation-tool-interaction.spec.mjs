@@ -7597,3 +7597,81 @@ test('a saved Measurement selected from the scene and the Arrow, cargo and Annot
   assert.equal(await measSelected(), null, 'selecting cargo dropped the Measurement selection');
   assert.deepEqual(errors, []);
 });
+
+test('the body of a SELECTED Arrow carries the whole arrow with the real mouse: one Undo step, both ends shift together, Escape or an off-canvas release writes nothing, and an Arrow across two surfaces refuses', { timeout: 300000 }, async t => {
+  const browser = await launch();
+  t.after(() => browser.close());
+  const { page, errors } = await openEditor(browser);
+  const arrow = await seedArrow(page, [GROUND_A[0], GROUND_A[2]], [GROUND_B[0], GROUND_B[2]], { name: 'Dock lane', width: 'bold' });
+  await page.waitForFunction(() => window.probe.annotations().length === 1);
+  await cameraSettled(page);
+  const stored = () => page.evaluate(id => window.probe.annotations().find(record => record.id === id), arrow.id);
+  const drag = async (from, to) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y, { steps: 10 });
+    await frames(page, 4);
+    await page.mouse.up();
+    await frames(page, 6);
+  };
+  const mid = await shaftMid(page);
+  await click(page, mid);
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+  const before = await stored();
+  const depth = await undoDepth(page);
+  const cameraBefore = await page.evaluate(() => window.probe.camera());
+  const casesBefore = await page.evaluate(() => window.probe.casesJson());
+
+  // Dragging the selected body carries both ends by the same offset; the arrow stays selected, on its surface, and nothing else moves.
+  await drag(mid, { x: mid.x + 50, y: mid.y + 30 });
+  const moved = await stored();
+  const shift = which => ['x', 'y', 'z'].map(axis => +(moved[which].position[axis] - before[which].position[axis]).toFixed(4));
+  assert.notDeepEqual(shift('start'), [0, 0, 0], 'the arrow moved');
+  assert.deepEqual(shift('end'), shift('start'), 'both ends moved by the same offset');
+  assert.equal(shift('start')[1], 0, 'it stayed on the ground');
+  assert.deepEqual([moved.id, moved.name, moved.color, moved.width, moved.style, moved.start.surface], [before.id, before.name, before.color, before.width, before.style, before.start.surface]);
+  assert.equal(await undoDepth(page) - depth, 1, 'one completed move is one history step');
+  assert.equal(await page.evaluate(() => window.probe.camera()), cameraBefore, 'the camera did not orbit');
+  assert.equal(await page.evaluate(() => window.probe.casesJson()), casesBefore, 'cargo did not move');
+  assert.equal(await arrowSelected(page), arrow.id, 'the arrow is still selected');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+  assert.deepEqual([(await stored()).start, (await stored()).end], [before.start, before.end], 'Undo puts it back exactly');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.redo()), true);
+  assert.deepEqual((await stored()).start, moved.start, 'and Redo moves it again');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+
+  // A cancelled or off-canvas move writes nothing and leaves Redo alone.
+  await click(page, mid);
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, arrow.id);
+  const settled = await undoDepth(page);
+  await page.mouse.move(mid.x, mid.y);
+  await page.mouse.down();
+  await page.mouse.move(mid.x + 40, mid.y + 20, { steps: 8 });
+  await frames(page, 4);
+  assert.equal(await page.evaluate(() => window.probe.AnnotationTool.moveState()), 'moving');
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await frames(page, 6);
+  assert.deepEqual((await stored()).start, before.start, 'Escape cancelled the move');
+  await click(page, mid);
+  await drag(mid, { x: 700, y: 20 });
+  assert.deepEqual((await stored()).start, before.start, 'a release off the 3D view is cancelled');
+  assert.equal(await undoDepth(page), settled, 'neither wrote history');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.redo()), true, 'Redo survived the cancelled moves');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+
+  // An Arrow whose ends are on different surfaces (cargo top and the ground) cannot be carried whole.
+  const mixed = await seedArrow(page, { cargo: 'cargo-a', local: { x: 0, y: 16, z: 0 } }, [120, 20]);
+  await cameraSettled(page);
+  const topOfA = await point(page, 70, 32, -20);
+  const ground = await point(page, 120, 0, 20);
+  const across = { x: (topOfA.x + ground.x) / 2, y: (topOfA.y + ground.y) / 2 };
+  await click(page, across);
+  await page.waitForFunction(id => window.probe.AnnotationTool.selectedId() === id, mixed.id);
+  const mixedBefore = JSON.stringify(await page.evaluate(id => window.probe.annotations().find(record => record.id === id), mixed.id));
+  const depthMixed = await undoDepth(page);
+  await drag(across, { x: across.x + 40, y: across.y + 20 });
+  assert.equal(JSON.stringify(await page.evaluate(id => window.probe.annotations().find(record => record.id === id), mixed.id)), mixedBefore, 'the whole move was refused');
+  assert.equal(await undoDepth(page), depthMixed);
+  assert.deepEqual(errors, []);
+});

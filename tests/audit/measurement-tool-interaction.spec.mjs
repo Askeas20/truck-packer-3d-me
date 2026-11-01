@@ -1480,3 +1480,94 @@ test('a saved measurement is selected and edited without creation mode: a click 
   assert.equal(await selected(), 0, 'Escape deselected it');
   assert.deepEqual(errors, []);
 });
+
+test('the body of a SELECTED saved measurement carries the whole measurement with the real mouse: one Undo step, both ends shift together and the length is kept, a grip still moves one end, Escape or an off-canvas release writes nothing, and a measurement across two surfaces refuses', { timeout: 240000 }, async t => {
+  const browser = await launch();
+  t.after(() => browser.close());
+  const { page, errors } = await openEditor(browser);
+  const seeded = await page.evaluate(([a, b]) => {
+    const { M, PackLibrary, StateStore } = window.probe;
+    const at = ([x, y, z]) => M.buildSpaceAnchor({ surface: 'ground', point: { x, y, z } });
+    const inst = PackLibrary.getById('fixture-pack').cases.find(c => c.id === 'cargo-a');
+    const caseData = StateStore.get('caseLibrary').find(c => c.id === inst.caseId);
+    const top = M.buildCargoAnchor({ instanceId: inst.id, local: { x: 0, y: 16, z: 0 }, caseData });
+    const flat = PackLibrary.addMeasurement('fixture-pack', { start: at(a), end: at(b), label: 'Dock run' });
+    const mixed = PackLibrary.addMeasurement('fixture-pack', { start: top, end: at([120, 0, 20]) });
+    if (!flat.ok || !mixed.ok) throw new Error('measurement seed failed');
+    return { flat: flat.measurement.id, mixed: mixed.measurement.id };
+  }, [GROUND_A, GROUND_B]);
+  await page.waitForFunction(() => document.querySelectorAll('.tp3d-measure-svg__segment').length === 2);
+  const settle = () => page.evaluate(() => new Promise(resolve => { let n = 0; const step = () => (++n > 12 ? resolve() : window.requestAnimationFrame(step)); window.requestAnimationFrame(step); }));
+  const stored = id => page.evaluate(which => JSON.stringify(window.probe.measurements().find(m => m.id === which)), id);
+  const packs = () => page.evaluate(() => JSON.stringify(window.probe.StateStore.get('packLibrary')));
+  const labels = () => page.evaluate(() => [...document.querySelectorAll('.tp3d-measure-label')].filter(l => !l.hidden).map(l => l.textContent.trim()).sort());
+  const drag = async (from, to) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y, { steps: 10 });
+    await settle();
+    await page.mouse.up();
+    await settle();
+  };
+  await settle();
+  const mid = await point(page, 180, 0, 75);
+  await click(page, mid);
+  await settle();
+  const before = JSON.parse(await stored(seeded.flat));
+  const startPacks = await packs();
+  const labelsBefore = await labels();
+  const cameraBefore = await page.evaluate(() => window.probe.camera());
+
+  // Dragging the selected body carries both ends by one offset, as one history step, on the ground it is on.
+  await drag(mid, { x: mid.x + 50, y: mid.y + 40 });
+  const moved = JSON.parse(await stored(seeded.flat));
+  const shift = which => ['x', 'y', 'z'].map(axis => +(moved[which].position[axis] - before[which].position[axis]).toFixed(4));
+  assert.notDeepEqual(shift('start'), [0, 0, 0], 'the measurement moved');
+  assert.deepEqual(shift('end'), shift('start'), 'both ends moved by the same offset');
+  assert.equal(shift('start')[1], 0, 'it stayed on the ground');
+  assert.deepEqual([moved.id, moved.label, moved.start.surface], [before.id, before.label, before.start.surface]);
+  assert.deepEqual(await labels(), labelsBefore, 'the length is unchanged');
+  assert.equal(await page.evaluate(() => window.probe.camera()), cameraBefore, 'the camera did not orbit');
+  assert.deepEqual(await page.evaluate(() => ({ armed: window.probe.MeasurementTool.isActive(), pending: window.probe.MeasurementTool.hasPending() })), { armed: false, pending: false });
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+  assert.equal(await packs(), startPacks, 'one Undo restores the whole Pack: the move was one step');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.redo()), true, 'and Redo replays it');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+
+  // Escape and an off-canvas release write nothing and leave Redo alone.
+  await click(page, mid);
+  await settle();
+  await page.mouse.move(mid.x, mid.y);
+  await page.mouse.down();
+  await page.mouse.move(mid.x + 40, mid.y + 20, { steps: 8 });
+  await settle();
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await settle();
+  assert.equal(await packs(), startPacks, 'Escape cancelled the move');
+  await click(page, mid);
+  await settle();
+  await drag(mid, { x: 700, y: 20 });
+  assert.equal(await packs(), startPacks, 'a release off the 3D view is cancelled');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.redo()), true, 'Redo survived the cancelled moves');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+
+  // A grip still moves one end only.
+  await click(page, mid);
+  await settle();
+  await drag(await point(page, ...GROUND_B), await point(page, 330, 0, 140));
+  const gripped = JSON.parse(await stored(seeded.flat));
+  assert.deepEqual([gripped.start, JSON.stringify(gripped.end) !== JSON.stringify(before.end)], [before.start, true], 'a grip drag moves that end only');
+  assert.equal(await page.evaluate(() => window.probe.StateStore.undo()), true);
+
+  // Cargo top to ground is two surfaces: the whole move is refused and the ends stay individually movable.
+  const topOfA = await point(page, 70, 32, -20);
+  const ground = await point(page, 120, 0, 20);
+  const across = { x: (topOfA.x + ground.x) / 2, y: (topOfA.y + ground.y) / 2 };
+  await click(page, across);
+  await settle();
+  const mixedBefore = await packs();
+  await drag(across, { x: across.x + 40, y: across.y + 20 });
+  assert.equal(await packs(), mixedBefore, 'a measurement across two surfaces was left where it was');
+  assert.deepEqual(errors, []);
+});

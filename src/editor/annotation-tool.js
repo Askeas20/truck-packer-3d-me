@@ -117,7 +117,7 @@ import {
   rectFromOffset,
   VIEWPORT_MARGIN,
 } from '../core/annotation-layout.js';
-import { cargoFaceFrame, drawAnchorUV, drawFrameKey, drawLift, patchContains, patchOutline } from '../core/measurements.js';
+import { cargoFaceFrame, drawAnchorUV, drawFrameKey, drawLift, patchContains, patchOutline, rigidMoveFrame, translateAnchorPair } from '../core/measurements.js';
 import { createSurfacePicker } from './surface-picker.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -230,6 +230,13 @@ const DRAW_MOVE_TEXT = Object.freeze({
   view: 'Move the pointer back over the surface. Release to leave the drawing where it was, or press Esc.',
 });
 const DRAW_MOVE_REFUSED = 'The whole drawing has to stay on its surface, so it was left where it was.';
+const ARROW_MOVE_TEXT = Object.freeze({
+  ok: 'Release to move the arrow here. Esc cancels.',
+  off: 'Part of the arrow would leave its surface. Release to leave it where it was, or press Esc.',
+  view: 'Move the pointer back over the surface. Release to leave the arrow where it was, or press Esc.',
+});
+const ARROW_MOVE_REFUSED = 'The whole arrow has to stay on its surface, so it was left where it was.';
+const ARROW_MOVE_UNSUPPORTED = 'This arrow\'s ends are on different surfaces, so it can only be moved one end at a time. Drag a handle.';
 const AMBIGUOUS_CARGO_DRAW_NOTICE = 'This cargo shares its ID with another item in the Load Plan, so a drawing cannot be made on it.';
 const UNSUPPORTED_DRAW_NOTICE = 'Drawings go on cargo faces and end caps, the truck and the ground. Curved sides and open space cannot take one.';
 // The shared reason copy says "callout"; a drawing describes its own surface.
@@ -682,8 +689,8 @@ export function createAnnotationTool({
       const record = recordById(moveDrag.id);
       const result = resultById(moveDrag.id);
       if (!record || !result || result.status !== ANNOTATION_STATUS.VALID || record.hidden || moveShapeOf(record) !== moveDrag.shape) {
-        cancelMoveDrag('The drawing changed, so the move was cancelled.');
-      } else if (moveDrag.packId !== pack.id || cargoPoseKey(pack, record.anchor) !== moveDrag.poseKey || layoutKey(pack) !== moveDrag.layoutKey) {
+        cancelMoveDrag(`The ${moveSubject(moveDrag)} changed, so the move was cancelled.`);
+      } else if (moveDrag.packId !== pack.id || movePoseKey(pack, record) !== moveDrag.poseKey || layoutKey(pack) !== moveDrag.layoutKey) {
         cancelMoveDrag('The cargo changed, so the move was cancelled.');
       }
     }
@@ -2532,7 +2539,19 @@ export function createAnnotationTool({
     if (ev.button !== 0 || ev.isPrimary === false || navigationKeys(ev) || (ev.pointerType !== 'touch' && ev.buttons !== 1)) return false;
     if (heldPointer || !drawHitWanted()) return false;
     const id = drawHitIdAt(ev.clientX, ev.clientY, ev.pointerType);
-    return Boolean(id) && beginDrawPress(ev, id);
+    if (id) return beginDrawPress(ev, id);
+    // The body of the SELECTED Arrow carries the whole arrow. An Arrow that is not selected takes no press: it is selected by a click
+    // (the Editor) and a drag that starts on it stays the camera or cargo drag it was. Its end grips are DOM buttons above the canvas, so
+    // a press on one never gets here.
+    const arrow = selectedArrowBodyAt(ev.clientX, ev.clientY, ev.pointerType);
+    return Boolean(arrow) && beginDrawPress(ev, arrow);
+  }
+
+  /** The id of the selected Arrow when a client position is on its drawn shaft (and no other Arrow's is nearer), else ''. */
+  function selectedArrowBodyAt(clientX, clientY, pointerType) {
+    if (!selectedId || !isArrow(recordById(selectedId))) return '';
+    const hit = arrowHitAt(clientX, clientY, pointerType);
+    return hit && hit.id === selectedId ? selectedId : '';
   }
 
   /** Whether the pointer is one whose press a saved stroke took and has not yet let go: the Editor's hover and cargo handling leave it alone. */
@@ -2565,7 +2584,14 @@ export function createAnnotationTool({
   /** Whether the pointer is over a stroke's line that a plain press would take (for the grab cursor); touch has no hover. */
   function hoverDrawing(ev) {
     if (!ev || heldPointer || ev.pointerType === 'touch' || navigationKeys(ev) || !drawHitWanted()) return false;
-    return Boolean(drawHitIdAt(ev.clientX, ev.clientY, ev.pointerType));
+    return Boolean(drawHitIdAt(ev.clientX, ev.clientY, ev.pointerType) || selectedArrowBodyAt(ev.clientX, ev.clientY, ev.pointerType));
+  }
+
+  function pointerOverCanvas(x, y) {
+    const canvas = getCanvas();
+    if (!canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
   }
 
   function snapInches(value) {
@@ -2574,7 +2600,16 @@ export function createAnnotationTool({
 
   /** What fixes a stroke's place: the surface it is on, the face and every vertex (a style edit leaves it alone). */
   function moveShapeOf(record) {
-    return JSON.stringify([record.anchor, record.face, record.points]);
+    return isArrow(record) ? JSON.stringify([record.start, record.end]) : JSON.stringify([record.anchor, record.face, record.points]);
+  }
+
+  /** Fingerprint of the committed cargo pose under whatever a whole-object move carries (a stroke's anchor, or both ends of an arrow). */
+  function movePoseKey(pack, record) {
+    return isArrow(record) ? arrowPoseKey(pack, record) : cargoPoseKey(pack, record.anchor);
+  }
+
+  function moveSubject(drag) {
+    return drag && drag.subject === 'arrow' ? 'arrow' : 'drawing';
   }
 
   /**
@@ -2589,17 +2624,21 @@ export function createAnnotationTool({
     const result = resultById(id);
     const pack = currentPack();
     const target = getCanvas();
-    if (!pack || !target || !isDraw(record) || !result || result.status !== ANNOTATION_STATUS.VALID || record.hidden || !isShownByMode(id)) return false;
+    const arrow = isArrow(record);
+    if (!pack || !target || !(arrow || isDraw(record)) || !result || result.status !== ANNOTATION_STATUS.VALID || record.hidden || !isShownByMode(id)) return false;
     keyboardModality = false;
     holdPointer(ev);
-    const surface = provisionalPoseActive() ? null : picker.beginDrawSurface({ anchor: record.anchor, face: record.face }, pack);
+    // A stroke moves along the face its anchor names; an arrow along the one surface BOTH ends share, or not at all.
+    const shared = arrow ? rigidMoveFrame(record.start, record.end) : null;
+    const place = arrow ? (shared.ok ? { anchor: record.start, face: shared.face } : null) : { anchor: record.anchor, face: record.face };
+    const surface = provisionalPoseActive() || !place ? null : picker.beginDrawSurface(place, pack);
     const base = surface ? picker.sampleDrawPlane(surface, ev.clientX, ev.clientY) : null;
-    const view = drawViews.get(id);
+    const view = arrow ? arrowViews.get(id) : drawViews.get(id);
     const movable = Boolean(surface && view && base && base.status === 'ok');
     moveDrag = {
-      id, pointerId: ev.pointerId, pointerType: ev.pointerType || 'mouse', startX: ev.clientX, startY: ev.clientY, lastX: ev.clientX, lastY: ev.clientY, target,
+      id, subject: arrow ? 'arrow' : 'drawing', pair: null, pointerId: ev.pointerId, pointerType: ev.pointerType || 'mouse', startX: ev.clientX, startY: ev.clientY, lastX: ev.clientX, lastY: ev.clientY, target,
       movable, stray: false, moved: false, dirty: false, packId: pack.id, epoch: sessionEpoch, surface, base: movable ? { u: base.u, v: base.v } : null,
-      shape: moveShapeOf(record), poseKey: cargoPoseKey(pack, record.anchor), layoutKey: layoutKey(pack), poseStamp: view ? view.poseStamp : 0,
+      shape: moveShapeOf(record), poseKey: movePoseKey(pack, record), layoutKey: layoutKey(pack), poseStamp: view && !arrow ? view.poseStamp : 0,
       du: 0, dv: 0, rev: 0, valid: true, reason: '', kind: 'ok', verdictKey: '',
     };
     lastClient = { x: ev.clientX, y: ev.clientY };
@@ -2703,6 +2742,8 @@ export function createAnnotationTool({
     if (!drag.moved) {
       if (Math.hypot(ev.clientX - drag.startX, ev.clientY - drag.startY) < PIN_DRAG_THRESHOLD_PX) return;
       if (!drag.movable) { // a stroke that cannot be carried does not take a drag as a click either
+        const stored = drag.subject === 'arrow' ? recordById(drag.id) : null;
+        if (!drag.stray && stored && !rigidMoveFrame(stored.start, stored.end).ok) notice(ARROW_MOVE_UNSUPPORTED);
         drag.stray = true;
         return;
       }
@@ -2728,12 +2769,14 @@ export function createAnnotationTool({
    * cannot take. `provisional` means the Editor now holds a scene-only pose.
    */
   function judgeMove(drag, x, y) {
+    // A whole arrow released off the 3D view is cancelled, never resolved against wherever the ray meets its plane far away.
+    if (drag.subject === 'arrow' && !pointerOverCanvas(x, y)) return { status: 'off', du: drag.du, dv: drag.dv, valid: false, reason: 'view' };
     const sample = picker.sampleDrawPlane(drag.surface, x, y);
     if (sample.status === 'provisional') return { status: 'provisional' };
     if (sample.status !== 'ok') return { status: 'off', du: drag.du, dv: drag.dv, valid: false, reason: 'view' };
     const du = snapInches(sample.u - drag.base.u);
     const dv = snapInches(sample.v - drag.base.v);
-    const verdict = PackLibrary.checkDrawMove(drag.packId, drag.id, du, dv);
+    const verdict = drag.subject === 'arrow' ? PackLibrary.checkArrowMove(drag.packId, drag.id, du, dv) : PackLibrary.checkDrawMove(drag.packId, drag.id, du, dv);
     return { status: 'ok', du, dv, valid: Boolean(verdict.ok), reason: verdict.ok ? '' : verdict.reason };
   }
 
@@ -2743,6 +2786,10 @@ export function createAnnotationTool({
       drag.du = judged.du;
       drag.dv = judged.dv;
       drag.rev += 1;
+      if (drag.subject === 'arrow') {
+        const record = recordById(drag.id);
+        drag.pair = record ? translateAnchorPair(record.start, record.end, drag.du, drag.dv) : null;
+      }
     }
     drag.valid = judged.valid;
     drag.reason = judged.reason;
@@ -2761,14 +2808,28 @@ export function createAnnotationTool({
       cancelMoveDrag(HELD_POSE_NOTICE);
       return;
     }
-    const view = drawViews.get(drag.id);
-    if (!view || !drawableIds.has(drag.id) || !isShownByMode(drag.id)) {
-      cancelMoveDrag('The drawing changed, so the move was cancelled.');
-      return;
-    }
-    if (view.poseStamp !== drag.poseStamp) {
-      cancelMoveDrag('The cargo changed, so the move was cancelled.');
-      return;
+    const subject = moveSubject(drag);
+    if (drag.subject === 'arrow') {
+      const record = recordById(drag.id);
+      const pack = currentPack();
+      if (!record || !drawableIds.has(drag.id) || !isShownByMode(drag.id)) {
+        cancelMoveDrag(`The ${subject} changed, so the move was cancelled.`);
+        return;
+      }
+      if (!pack || movePoseKey(pack, record) !== drag.poseKey) {
+        cancelMoveDrag('The cargo changed, so the move was cancelled.');
+        return;
+      }
+    } else {
+      const view = drawViews.get(drag.id);
+      if (!view || !drawableIds.has(drag.id) || !isShownByMode(drag.id)) {
+        cancelMoveDrag(`The ${subject} changed, so the move was cancelled.`);
+        return;
+      }
+      if (view.poseStamp !== drag.poseStamp) {
+        cancelMoveDrag('The cargo changed, so the move was cancelled.');
+        return;
+      }
     }
     if (!drag.moved || !drag.dirty) return;
     drag.dirty = false;
@@ -2795,6 +2856,7 @@ export function createAnnotationTool({
 
   /** A press that never became a drag is a click: it selects the stroke like its list row does (or deselects it, if it already was). Nothing is written. */
   function clickDrawing(finished) {
+    if (finished.subject === 'arrow') return; // a click on the selected arrow's body leaves it selected, as it always did
     if (finished.stray || !recordById(finished.id) || !drawableIds.has(finished.id) || !drawHitWanted()) return;
     select(finished.id, { toggle: true });
     refocusViewportIfLost();
@@ -2815,30 +2877,33 @@ export function createAnnotationTool({
     const record = recordById(finished.id);
     if (!pack || pack.id !== finished.packId || finished.epoch !== sessionEpoch || !toolShown || showMode === 'off' ||
         sceneOwnedElsewhere() || provisionalPoseActive() || !record || moveShapeOf(record) !== finished.shape) {
-      setStatus('The drawing changed, so the move was cancelled.');
+      setStatus(`The ${moveSubject(finished)} changed, so the move was cancelled.`);
       return;
     }
-    if (cargoPoseKey(pack, record.anchor) !== finished.poseKey || layoutKey(pack) !== finished.layoutKey) {
+    if (movePoseKey(pack, record) !== finished.poseKey || layoutKey(pack) !== finished.layoutKey) {
       setStatus('The cargo changed, so the move was cancelled.');
       return;
     }
+    const arrow = finished.subject === 'arrow';
+    const subject = moveSubject(finished);
+    const refused = arrow ? ARROW_MOVE_REFUSED : DRAW_MOVE_REFUSED;
     if (!judged || judged.status !== 'ok' || !judged.valid) {
-      notice(DRAW_MOVE_REFUSED);
+      notice(refused);
       return;
     }
     if (!judged.du && !judged.dv) {
-      setStatus('The drawing was left where it was.');
+      setStatus(`The ${subject} was left where it was.`);
       return;
     }
-    const outcome = PackLibrary.moveDraw(pack.id, finished.id, judged.du, judged.dv);
+    const outcome = arrow ? PackLibrary.moveArrow(pack.id, finished.id, judged.du, judged.dv) : PackLibrary.moveDraw(pack.id, finished.id, judged.du, judged.dv);
     if (!outcome.ok) {
-      if (outcome.reason === 'invalid' || outcome.reason === 'unresolved') notice(DRAW_MOVE_REFUSED);
-      else UIComponents.showToast('Could not move this drawing.', 'error', { title: 'Annotations' });
+      if (outcome.reason === 'invalid' || outcome.reason === 'unresolved' || outcome.reason === 'too-short') notice(refused);
+      else UIComponents.showToast(`Could not move this ${subject}.`, 'error', { title: 'Annotations' });
       return;
     }
     adoptSelection(finished.id);
     visDirty = true;
-    setStatus(outcome.unchanged ? 'The drawing was left where it was.' : 'Drawing moved.', { tone: 'success' });
+    setStatus(outcome.unchanged ? `The ${subject} was left where it was.` : (arrow ? 'Arrow moved.' : 'Drawing moved.'), { tone: 'success' });
   }
 
   /** Release everything a move holds. After this no pointer event can reach it, so none can bring it back. */
@@ -3461,7 +3526,7 @@ export function createAnnotationTool({
   /** Context-sensitive guidance: empty unless something is relevant right now. */
   function guidanceText(blockedNow) {
     if (blockedNow) return blockedMessage(blockedNow);
-    if (moveDrag && moveDrag.moved) return DRAW_MOVE_TEXT[moveDrag.kind];
+    if (moveDrag && moveDrag.moved) return (moveDrag.subject === 'arrow' ? ARROW_MOVE_TEXT : DRAW_MOVE_TEXT)[moveDrag.kind];
     if (statusMessage) return statusMessage;
     if (showMode === 'off') return SHOW_OFF_HINT;
     if (pinDrag && pinDrag.moved) return pinDrag.which ? 'Drag the handle onto a surface. Esc cancels.' : 'Drag the marker onto a surface. Esc cancels.';
@@ -4515,6 +4580,11 @@ export function createAnnotationTool({
     return shape ? { shape, tail, head, tailClipped, headClipped } : null;
   }
 
+  /** A shifted non-cargo anchor's own position, for the live preview of a carried arrow (cargo anchors follow their live group instead). */
+  function carriedPoint(anchor) {
+    return anchor.kind === 'cargo' ? null : anchor.position;
+  }
+
   /**
    * Which arrows are drawn this frame and where they project. An arrow is drawn only while it is Valid (both ends
    * resolve), not hidden, shown by the Show mode, still at least the minimum length apart as the scene displays
@@ -4536,8 +4606,14 @@ export function createAnnotationTool({
       const result = results[index];
       const candidate = pinDrag && pinDrag.moved && pinDrag.id === record.id && pinDrag.which && pinDrag.candidate ? pinDrag.candidate : null;
       // The end being dragged follows the surface under the pointer; everything else follows the displayed scene.
-      const startOk = candidate && pinDrag.which === 'start' ? view.startWorld.copy(candidate.world) : liveAnchorWorld(record.start, result.start, view.startWorld);
-      const endOk = candidate && pinDrag.which === 'end' ? view.endWorld.copy(candidate.world) : liveAnchorWorld(record.end, result.end, view.endWorld);
+      // A whole-arrow move shows both ends at the live offset: the shifted anchors, from the same pure move the write uses.
+      const carried = moveDrag && moveDrag.moved && moveDrag.subject === 'arrow' && moveDrag.id === record.id && moveDrag.pair ? moveDrag.pair : null;
+      const startAnchor = carried ? carried.start : record.start;
+      const endAnchor = carried ? carried.end : record.end;
+      const startOk = candidate && pinDrag.which === 'start' ? view.startWorld.copy(candidate.world)
+        : liveAnchorWorld(startAnchor, carried ? carriedPoint(startAnchor) : result.start, view.startWorld);
+      const endOk = candidate && pinDrag.which === 'end' ? view.endWorld.copy(candidate.world)
+        : liveAnchorWorld(endAnchor, carried ? carriedPoint(endAnchor) : result.end, view.endWorld);
       if (!startOk || !endOk || view.startWorld.distanceTo(view.endWorld) / scale < MIN_ARROW_LENGTH_INCHES) {
         hideArrowView(view);
         return;
@@ -4574,7 +4650,9 @@ export function createAnnotationTool({
     const gripsAllowed = !isActive() && !sceneOwnedElsewhere();
     entries.forEach(({ record, view, projection, selected: isSelected }) => {
       const selected = isSelected;
-      paintArrow(view.graphic, projection.shape, { color: paintColorOf(record), style: lineStyleOf(record), selected, occluded: !view.front });
+      // A whole-arrow move that cannot be dropped where the pointer is shows the arrow as the dashed, behind-cargo look.
+      const refused = Boolean(moveDrag && moveDrag.moved && moveDrag.subject === 'arrow' && moveDrag.id === record.id && !moveDrag.valid);
+      paintArrow(view.graphic, projection.shape, { color: paintColorOf(record), style: lineStyleOf(record), selected, occluded: !view.front || refused });
       view.shown = true;
       // Kept for the Editor's click test: the layer pixels of the shaft exactly as it was just painted.
       view.tail = projection.tail;
