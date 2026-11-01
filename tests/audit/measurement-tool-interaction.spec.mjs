@@ -685,10 +685,11 @@ test('the Measurements panel drags by its grip like AutoPack Results, stays insi
   const camera = await page.evaluate(() => window.probe.camera());
   await page.mouse.move(g.x + g.w / 2, g.y + g.h / 2);
   await page.mouse.down();
-  await page.mouse.move(g.x + g.w / 2 - 300, g.y + g.h / 2 + 160, { steps: 8 });
+  // Right and down: the panel starts at the viewport's left edge (the layout has a left sidebar), so a leftward drag would only clamp.
+  await page.mouse.move(g.x + g.w / 2 + 200, g.y + g.h / 2 + 160, { steps: 8 });
   await page.mouse.up();
   const moved = await page.evaluate(() => window.probe.box('#editor-measure-panel'));
-  assert.ok(Math.abs(moved.x - (start.x - 300)) < 1 && Math.abs(moved.y - (start.y + 160)) < 1, 'the panel follows the drag exactly');
+  assert.ok(Math.abs(moved.x - (start.x + 200)) < 1 && Math.abs(moved.y - (start.y + 160)) < 1, 'the panel follows the drag exactly');
   assert.equal(await page.evaluate(() => window.probe.camera()), camera, 'dragging the panel does not orbit the scene');
   assert.equal(await count(page), 1, 'and places no point');
   assert.equal(await page.evaluate(() => document.querySelector('.tp3d-measure-panel__toggle').getAttribute('aria-expanded')), 'true', 'a drag does not collapse it');
