@@ -1,9 +1,10 @@
 /**
  * @file measurement-tool-lifecycle.spec.mjs
  * @description Pins how Measurement Tool V1 data lives inside a Load Plan: the normalizer whitelist
- *   (G1), writes that stay outside cargo Undo/Redo and never roll `lastEdited` back (G2), duplicate
- *   and import instance-ID remapping (G3), and export/backup projection plus strict restore
- *   validation (G4). The pure model is pinned in measurement-tool-core.spec.mjs.
+ *   (G1), writes that are one step each in the same chronological Undo/Redo history as cargo edits
+ *   and restore their exact `lastEdited` (G2), duplicate and import instance-ID remapping (G3), and
+ *   export/backup projection plus strict restore validation (G4). The pure model is pinned in
+ *   measurement-tool-core.spec.mjs.
  *   Contract: docs/product/TP3D-MASTER-TODO-V6.md Section 4.1.
  */
 
@@ -98,28 +99,31 @@ test('showMeasurementTool defaults On, is a boolean preference and takes the lig
   } finally { unsubscribe(); }
 });
 
-test('G2 add, rename, move and delete are measurement-only edits: lastEdited moves, cargo Undo does not', () => {
+test('G2 add, rename, move and delete are each one Undo/Redo step; no-ops, refusals and other Load Plans write nothing', () => {
   seed();
   const notifications = [];
   const unsubscribe = StateStore.subscribe((_changes, _state, notification) => {
     if (notification) notifications.push(notification.type);
   });
   try {
+    const depth = StateStore.undoDepth();
     const before = stored('A');
     const added = PackLibrary.addMeasurement('A', pair());
     assert.equal(added.ok, true);
     assert.equal(notifications.at(-1), 'pack-measurements', 'derived notification: the app refreshes only the overlay and list');
     assert.ok(stored('A').lastEdited > before.lastEdited, 'creating a measurement updates lastEdited');
-    assert.equal(StateStore.undo(), false, 'and adds no cargo Undo step');
+    assert.equal(StateStore.undoDepth(), depth + 1, 'a completed creation is exactly one Undo step');
     assert.equal(stored('B').measurements, undefined, 'another Load Plan is untouched');
 
     const id = added.measurement.id;
     const renamed = PackLibrary.renameMeasurement('A', id, '  Door   gap ');
     assert.equal(renamed.ok, true);
     assert.equal(PackLibrary.getMeasurements('A')[0].label, 'Door gap');
+    assert.equal(StateStore.undoDepth(), depth + 2, 'a rename is exactly one more step');
     const same = PackLibrary.renameMeasurement('A', id, 'Door gap');
     assert.equal(same.unchanged, true, 'an unchanged name writes nothing');
     assert.equal(PackLibrary.renameMeasurement('A', 'nope', 'x').reason, 'not-found');
+    assert.equal(StateStore.undoDepth(), depth + 2, 'an unchanged or refused rename adds no step');
 
     const edited = stored('A').lastEdited;
     const cargoAnchor = M.buildCargoAnchor({ instanceId: 'inst-x', local: { x: 24, y: 2, z: 3 }, caseData: CASE });
@@ -132,15 +136,20 @@ test('G2 add, rename, move and delete are measurement-only edits: lastEdited mov
     assert.equal(record.createdAt, added.measurement.createdAt);
     assert.ok(stored('A').lastEdited >= edited);
     assert.equal(notifications.at(-1), 'pack-measurements');
-    assert.equal(StateStore.undo(), false, 'moving an endpoint adds no cargo Undo step either');
+    assert.equal(StateStore.undoDepth(), depth + 3, 'a completed endpoint move is exactly one more step');
+    const unchanged = PackLibrary.moveMeasurementEndpoint('A', id, 'end', cargoAnchor);
+    assert.deepEqual([unchanged.ok, unchanged.unchanged], [true, true], 'the same content at the same place is no edit');
     assert.equal(PackLibrary.moveMeasurementEndpoint('A', id, 'end', { kind: 'space', surface: 'sky', position: { x: 0, y: 0, z: 0 } }).reason, 'invalid');
     assert.equal(PackLibrary.moveMeasurementEndpoint('A', 'nope', 'end', cargoAnchor).reason, 'not-found');
     assert.equal(PackLibrary.moveMeasurementEndpoint('missing', id, 'end', cargoAnchor).reason, 'pack-not-found');
     assert.equal(PackLibrary.getMeasurements('A')[0].end.kind, 'cargo', 'a refused move changes nothing');
+    assert.equal(StateStore.undoDepth(), depth + 3, 'a no-op or refused move adds no step');
 
     assert.equal(PackLibrary.deleteMeasurement('A', 'nope').reason, 'not-found');
+    assert.equal(StateStore.undoDepth(), depth + 3, 'a refused deletion adds no step');
     assert.equal(PackLibrary.deleteMeasurement('A', id).ok, true);
     assert.equal(PackLibrary.getMeasurements('A').length, 0);
+    assert.equal(StateStore.undoDepth(), depth + 4, 'a deletion is exactly one step');
   } finally { unsubscribe(); }
 });
 
@@ -155,22 +164,46 @@ test('the per-plan maximum of 100 is enforced on creation and a malformed record
   assert.equal(PackLibrary.addMeasurement('missing', pair()).reason, 'pack-not-found');
 });
 
-test('G2 cargo Undo/Redo keeps measurements and never rolls lastEdited back past a measurement edit', () => {
+test("G2 Undo/Redo walks measurement and cargo edits in the order they were made, restoring each step's exact lastEdited", t => {
+  let clock = 1000;
+  t.mock.method(Date, 'now', () => (clock += 10)); // every write gets its own, later time
   seed();
-  PackLibrary.addMeasurement('A', pair());
-  StateStore.set({ packLibrary: StateStore.get('packLibrary').map(p => (p.id === 'A' ? { ...p, notes: 'cargo edit' } : p)) });
+  const otherPlan = JSON.stringify(stored('B'));
+  const first = PackLibrary.addMeasurement('A', pair());
+  assert.equal(first.ok, true);
+  const afterFirst = stored('A').lastEdited;
+  PackLibrary.update('A', { notes: 'cargo edit' });
+  const afterCargo = stored('A').lastEdited;
   const second = PackLibrary.addMeasurement('A', pair(2));
   assert.equal(second.ok, true);
-  const editedAt = stored('A').lastEdited;
+  const afterSecond = stored('A').lastEdited;
+  const both = JSON.stringify(PackLibrary.getMeasurements('A'));
   assert.equal(PackLibrary.getMeasurements('A').length, 2);
-  assert.equal(StateStore.undo(), true, 'the cargo edit is undone');
+  assert.ok(123 < afterFirst && afterFirst < afterCargo && afterCargo < afterSecond, 'each edit has its own, later time');
+
+  assert.equal(StateStore.undo(), true, 'the most recent edit, the second measurement, is undone first');
+  assert.equal(stored('A').notes, 'cargo edit', 'the cargo edit made before it is still in place');
+  assert.deepEqual(PackLibrary.getMeasurements('A').map(r => r.id), [first.measurement.id]);
+  assert.equal(stored('A').lastEdited, afterCargo, 'Undo restores the time the Pack had in that state');
+  assert.equal(StateStore.undo(), true, 'then the cargo edit');
   assert.equal(stored('A').notes, undefined);
-  assert.equal(PackLibrary.getMeasurements('A').length, 2, 'Undo neither erases nor resurrects measurements');
-  assert.ok(stored('A').lastEdited >= editedAt, 'Undo must not move lastEdited back past the measurement edit');
+  assert.deepEqual(PackLibrary.getMeasurements('A').map(r => r.id), [first.measurement.id], 'the earlier measurement is still there');
+  assert.equal(stored('A').lastEdited, afterFirst);
+  assert.equal(StateStore.undo(), true, 'then the first measurement');
+  assert.equal(PackLibrary.getMeasurements('A').length, 0);
+  assert.equal(stored('A').lastEdited, 123, 'back to the time the Pack was created with');
+  assert.equal(StateStore.undo(), false, 'and nothing more');
+
+  assert.equal(StateStore.redo(), true);
+  assert.equal(stored('A').lastEdited, afterFirst);
   assert.equal(StateStore.redo(), true);
   assert.equal(stored('A').notes, 'cargo edit');
-  assert.equal(PackLibrary.getMeasurements('A').length, 2);
-  assert.ok(stored('A').lastEdited >= editedAt);
+  assert.equal(stored('A').lastEdited, afterCargo);
+  assert.equal(StateStore.redo(), true);
+  assert.equal(stored('A').lastEdited, afterSecond);
+  assert.equal(JSON.stringify(PackLibrary.getMeasurements('A')), both, 'Redo restores both records with identical ids, anchors, labels and timestamps');
+  assert.equal(StateStore.redo(), false);
+  assert.equal(JSON.stringify(stored('B')), otherPlan, 'the other Load Plan never changed');
 });
 
 test('deleting cargo leaves its measurement stored as Unresolved and undoing the delete resolves it again', () => {

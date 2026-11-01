@@ -20,10 +20,12 @@
  *     the canvas.
  *   - Selecting an annotation clears the cargo selection and selecting cargo clears the annotation, so
  *     Delete acts on the annotation only when it owns the selection and never deletes cargo as a side
- *     effect. Ctrl/Cmd+Z stays cargo history; only an unfinished marker or card drag is cancelled by it.
- *     Deleting a callout offers a one-level Undo button in the panel, independent of cargo history.
+ *     effect. Undo and Redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z) are the shared StateStore history's: a committed
+ *     annotation edit is one step in the same history as cargo and measurements, and an unfinished marker or
+ *     card drag, re-attach, arrow tail or stroke is cancelled by them without writing. Deleting an annotation
+ *     shows a notification toast only; the toast carries no Undo button of its own.
  *   - One Escape closes one owner, in this order: a modal, dropdown, text field or popover that owns it
- *     (they keep it), the presentation view, an unfinished drag, the editor card, a pending re-attach, a
+ *     (they keep it), an unfinished drag, the editor card, a pending re-attach, a
  *     pending arrow tail, the armed tool, the annotation selection. Anything else is left to the existing
  *     handlers (cargo deselection, drawers).
  *   - An arrow is two surface anchors drawn as an SVG shaft and head in this same layer (never a Three.js
@@ -49,15 +51,6 @@
  *     edit: it never blocks annotations or cancels an unfinished one.
  *   - Annotations stay drawn while the Measurement Tool owns the scene, but only as a view: markers and cards
  *     take no pointer or keyboard input until that mode ends (the Editor wires `isSceneToolOwnedElsewhere`).
- *   - Present is a viewing mode of this session only: never saved, never a property of a record, and it writes nothing.
- *     The panel, selection handles, end grips, previews and card buttons are hidden, and the layer goes inert, while the saved
- *     annotations stay drawn per the Show and Callouts settings and the selection is kept (so Show Selected still shows it).
- *     The camera keeps navigating, but cargo is read-only: the Editor's pointer and keyboard routing asks `isPresenting()` and
- *     never selects, drags, highlights or edits cargo meanwhile (OrbitControls is untouched), and Present will not start over a
- *     live drag or held case. An "Exit presentation view" control, a sibling of the inert layer, sits bottom center and
- *     rides above the AutoPack Results card; it and Escape end Present. Present will not start over an unfinished gesture,
- *     asks before it drops an editor with unsaved changes, and ends (the panel returns) on a Load Plan, workspace or screen
- *     change, Settings > Show Annotations off, an operation or preview that pauses annotations, or Measurement Mode.
  *   - Cargo anchors are only ever picked from, and resolved against, COMMITTED poses; while the Editor
  *     owns a provisional pose a pick on cargo is refused. Overlay positions follow the pose the scene
  *     displays so a marker never floats away from cargo that is being dragged or animated.
@@ -85,6 +78,7 @@ import {
   DRAW_WIDTHS,
   LINE_STYLES,
   MAX_ANNOTATIONS_PER_PACK,
+  MAX_ANNOTATION_NAME_LENGTH,
   MAX_CALLOUT_DESCRIPTION_LENGTH,
   MAX_CALLOUT_TITLE_LENGTH,
   MAX_CARD_OFFSET_PX,
@@ -108,6 +102,7 @@ import {
   clampRect,
   clipSegmentToConvex,
   clipSegmentToNear,
+  distanceToPolyline,
   estimateCardHeight,
   fitEditorClear,
   fitLabels,
@@ -122,7 +117,7 @@ import {
   rectFromOffset,
   VIEWPORT_MARGIN,
 } from '../core/annotation-layout.js';
-import { cargoFaceFrame, drawAnchorUV, drawFrameKey, drawLift, patchContains, patchOutline } from '../core/measurements.js';
+import { cargoFaceFrame, drawAnchorUV, drawFrameKey, drawLift, patchContains, patchOutline, rigidMoveFrame, translateAnchorPair } from '../core/measurements.js';
 import { createSurfacePicker } from './surface-picker.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -134,7 +129,6 @@ const CARD_DRAG_THRESHOLD_PX = 4;
 const HOVER_PICK_INTERVAL_MS = 40;
 const OCCLUSION_INTERVAL_MS = 100;
 const STATUS_VISIBLE_MS = 3200;
-const UNDO_VISIBLE_MS = 12000;
 const NOTICE_INTERVAL_MS = 1400;
 const OFFSCREEN_MARGIN_PX = 30;
 // Freehand strokes. A sample is taken when the pointer has moved this far on screen since the last one, and a jump
@@ -158,6 +152,7 @@ const DRAW_FIT_MIN = 0.7;
 const DRAW_EDGE_PX = Object.freeze({ neutral: 3, dotted: 1.5, selected: 1.5 });
 const DRAW_SELECTED_EDGE_PER_PX = 0.3;
 const DRAW_EDGE_FLOOR_PX = 1.5;
+const ARROW_DOTTED_HALO_PX = DRAW_EDGE_PX.dotted; // a Dotted arrow's neutral shaft edge in screen pixels, in total (as a Dotted drawing's)
 const DRAW_OCCLUSION_RAYS_PER_STROKE = 5;
 const DRAW_OCCLUSION_RAYS_PER_TICK = 60;
 const PIN_RECT_PX = 24;
@@ -173,11 +168,6 @@ const PANEL_SHEET_MAX_FRACTION = 0.46; // the compact panel's own max-height (st
 const PANEL_LIMIT_PROPERTY = '--tp3d-annot-panel-limit'; // the desktop panel's extra max-height (styles/main.css)
 const PANEL_MAX_HEIGHT_PX = 520; // the desktop panel's own max-height is min(this, the layer's height - the inset below)
 const PANEL_MAX_HEIGHT_INSET_PX = 140;
-const PRESENT_EXIT_BOTTOM_PX = 14; // the Exit control's distance from the layer's bottom edge (the Editor's own corner controls use the same)
-const PRESENT_EXIT_GAP_PX = 6; // the clear gap it keeps above whatever holds the spot (AutoPack Results, the review button)
-const PRESENT_BUSY_NOTICE = 'Finish or cancel what you are placing before presenting.';
-const PRESENT_HELD_NOTICE = 'Place or cancel the held case before presenting.';
-const PRESENT_EXIT_LABEL = 'Exit presentation view';
 const MIN_RAY_LENGTH = 1e-6;
 const HELD_POSE_NOTICE = 'Place or cancel the held case before working with annotations on cargo.';
 const AMBIGUOUS_CARGO_NOTICE = 'This cargo shares its ID with another item in the Load Plan, so a callout cannot be attached to it.';
@@ -240,6 +230,13 @@ const DRAW_MOVE_TEXT = Object.freeze({
   view: 'Move the pointer back over the surface. Release to leave the drawing where it was, or press Esc.',
 });
 const DRAW_MOVE_REFUSED = 'The whole drawing has to stay on its surface, so it was left where it was.';
+const ARROW_MOVE_TEXT = Object.freeze({
+  ok: 'Release to move the arrow here. Esc cancels.',
+  off: 'Part of the arrow would leave its surface. Release to leave it where it was, or press Esc.',
+  view: 'Move the pointer back over the surface. Release to leave the arrow where it was, or press Esc.',
+});
+const ARROW_MOVE_REFUSED = 'The whole arrow has to stay on its surface, so it was left where it was.';
+const ARROW_MOVE_UNSUPPORTED = 'This arrow\'s ends are on different surfaces, so it can only be moved one end at a time. Drag a handle.';
 const AMBIGUOUS_CARGO_DRAW_NOTICE = 'This cargo shares its ID with another item in the Load Plan, so a drawing cannot be made on it.';
 const UNSUPPORTED_DRAW_NOTICE = 'Drawings go on cargo faces and end caps, the truck and the ground. Curved sides and open space cannot take one.';
 // The shared reason copy says "callout"; a drawing describes its own surface.
@@ -292,6 +289,10 @@ export function createAnnotationTool({
   let viewGate = null; // { controls, prior } while this tool holds OrbitControls' rotation off (Draw mode, or a press a saved drawing took)
   let draft = null; // the editor card: a new callout or an edit of an existing one
   let selectedId = null;
+  const collapsedIds = new Set(); // session-only: callouts folded to their header; never saved, never changes the hidden flag or selection
+  let renamingId = null; // the arrow or drawing whose name is being typed in its row; nothing is written until it is committed
+  let colorPreview = null; // { id, color }: the color a picker is showing for the selected arrow or drawing; render-only, never stored
+  let revealedId = null; // the selection whose row was last revealed: a selection change reveals its row once, never per frame
   let display = 'markers'; // view-level: 'markers' | 'labels' | 'cards'; not saved with the Load Plan
   let showMode = 'all'; // view-level: 'all' | 'selected' | 'off'; never saved, never overrides a record's own hidden flag
   let lastCustomColor = null; // the custom color last picked in this session, offered again by the swatch
@@ -319,8 +320,6 @@ export function createAnnotationTool({
   let lastBlockedReason = null;
   let sessionEpoch = 0; // bumped whenever the Load Plan session ends: a pending dialog answer from an older one is ignored
   let graphicsHidden = true; // the overlay is empty while annotations are paused
-  let lastDeleted = null; // { packId, record, index } for the panel's one-level Undo
-  let deletedTimer = null;
   let keyboardModality = false;
   let suppressClick = false;
   let compact = false;
@@ -329,8 +328,6 @@ export function createAnnotationTool({
   let panelShift = { x: 0, y: 0 }; // display-only shift (px) that keeps the desktop panel off AutoPack Results
   let panelBehindEditor = false; // the desktop panel yields to an open editor card it would otherwise hide (display only)
   let panelParts = null;
-  let presenting = false; // Present: a viewing mode of this session only; the panel and editing controls are hidden, nothing is saved
-  let presentExit = null; // the "Exit presentation view" button: a sibling of the layer, so the inert layer never covers or disables it
   let panelObserver = null;
   let flowObserver = null;
   let suppressToggleClick = false;
@@ -403,9 +400,10 @@ export function createAnnotationTool({
   };
   const isCallout = record => Boolean(record) && record.type === ANNOTATION_TYPE_CALLOUT;
   const isArrow = record => Boolean(record) && record.type === ANNOTATION_TYPE_ARROW;
-  const arrowName = id => `Arrow ${arrowNumbers.get(id) || ''}`.trim();
+  // A custom name replaces the generated one everywhere an arrow or a drawing is named; without one the generated name stays.
+  const arrowName = id => { const named = recordById(id); return named && named.name ? named.name : `Arrow ${arrowNumbers.get(id) || ''}`.trim(); };
   const isDraw = record => Boolean(record) && record.type === ANNOTATION_TYPE_DRAW;
-  const drawName = id => `Drawing ${drawNumbers.get(id) || ''}`.trim();
+  const drawName = id => { const named = recordById(id); return named && named.name ? named.name : `Drawing ${drawNumbers.get(id) || ''}`.trim(); };
   const isStyled = record => isArrow(record) || isDraw(record);
 
   // The refusal wording names what is being placed: an arrow end or a callout marker.
@@ -565,6 +563,8 @@ export function createAnnotationTool({
   }
 
   function clearCargoSelection() {
+    // Only one scene object or cargo selection at a time: a saved measurement selected from the scene steps aside too.
+    if (typeof els.clearMeasurementSelection === 'function') els.clearMeasurementSelection();
     if (typeof els.clearCargoSelection !== 'function') return;
     selfClearing = true;
     try {
@@ -577,18 +577,15 @@ export function createAnnotationTool({
   // ==========================================================================
   // SECTION: SESSION (what the tool remembers while the Editor is open)
   // ==========================================================================
-  function clearDeleted() {
-    lastDeleted = null;
-    if (deletedTimer) window.clearTimeout(deletedTimer);
-    deletedTimer = null;
-  }
 
   function resetSession() {
     sessionEpoch += 1;
     showMode = 'all';
     closePanel();
     selectedId = null;
-    clearDeleted();
+    collapsedIds.clear();
+    renamingId = null;
+    revealedId = null;
     records = [];
     results = [];
     numbers = new Map();
@@ -606,7 +603,17 @@ export function createAnnotationTool({
    * annotation owns Delete and no cargo can be deleted as a side effect. Refused while the Editor holds a
    * provisional pose, because clearing the cargo selection would abandon that hold.
    */
+  /** Folds a callout to its header, or opens it again. Session-only: selection, the hidden flag and the Load Plan are untouched. */
+  function toggleCollapsed(id) {
+    if (!id || !recordById(id)) return;
+    if (collapsedIds.has(id)) collapsedIds.delete(id);
+    else collapsedIds.add(id);
+    visDirty = true;
+    refreshOverlay();
+  }
+
   function select(id, { toggle = false } = {}) {
+    colorPreview = null;
     let target = id && recordById(id) ? id : null;
     if (toggle && target && selectedId === target) target = null;
     if (target && showMode === 'off') {
@@ -682,12 +689,11 @@ export function createAnnotationTool({
       const record = recordById(moveDrag.id);
       const result = resultById(moveDrag.id);
       if (!record || !result || result.status !== ANNOTATION_STATUS.VALID || record.hidden || moveShapeOf(record) !== moveDrag.shape) {
-        cancelMoveDrag('The drawing changed, so the move was cancelled.');
-      } else if (moveDrag.packId !== pack.id || cargoPoseKey(pack, record.anchor) !== moveDrag.poseKey || layoutKey(pack) !== moveDrag.layoutKey) {
+        cancelMoveDrag(`The ${moveSubject(moveDrag)} changed, so the move was cancelled.`);
+      } else if (moveDrag.packId !== pack.id || movePoseKey(pack, record) !== moveDrag.poseKey || layoutKey(pack) !== moveDrag.layoutKey) {
         cancelMoveDrag('The cargo changed, so the move was cancelled.');
       }
     }
-    if (lastDeleted && lastDeleted.packId !== pack.id) clearDeleted();
     visDirty = true;
     renderPanel();
     ensureLoop();
@@ -752,8 +758,6 @@ export function createAnnotationTool({
     layerObserver = null;
     if (layerParts && layerParts.svg.parentNode) layerParts.svg.parentNode.removeChild(layerParts.svg);
     layerParts = null;
-    if (presentExit && presentExit.parentNode) presentExit.parentNode.removeChild(presentExit);
-    presentExit = null;
   }
 
   // ==========================================================================
@@ -783,6 +787,7 @@ export function createAnnotationTool({
       flowObserver.observe(els.panel);
     }
     sync();
+    settle();
     const unreadable = records.filter(record => record.type === ANNOTATION_TYPE_UNREADABLE).length;
     if (unreadable) {
       UIComponents.showToast(
@@ -799,7 +804,6 @@ export function createAnnotationTool({
    */
   function closePanel() {
     const wasOpen = panelOpen;
-    endPresent({ panel: false }); // the panel is closing, so nothing is brought back
     cancelStroke();
     cancelMoveDrag();
     cancelPinDrag();
@@ -812,7 +816,6 @@ export function createAnnotationTool({
     hover = null;
     press = null;
     panelOpen = false;
-    clearDeleted();
     if (statusTimer) window.clearTimeout(statusTimer);
     statusTimer = null;
     statusMessage = '';
@@ -836,11 +839,6 @@ export function createAnnotationTool({
   }
 
   function togglePanel() {
-    if (presenting) {
-      // The panel is hidden, not closed: the toolbar button brings it back (and the editing controls) rather than closing it.
-      endPresent();
-      return true;
-    }
     if (panelOpen) {
       closePanel();
       return false;
@@ -873,9 +871,32 @@ export function createAnnotationTool({
     return true;
   }
 
+  /**
+   * A user's choice of an existing annotation (a row, a marker or a card head) ends an armed creation tool and any unfinished
+   * placement, without writing. The selection then owns the controls, and creation resumes only when the user arms a tool again.
+   * An open callout draft is not touched here: its own confirm flow decides it.
+   */
+  function endCreation() {
+    colorPreview = null;
+    if (!tool) return;
+    cancelStroke();
+    cancelMoveDrag();
+    cancelArrowTail();
+    tool = null;
+    hover = null;
+    hoverDirty = true;
+    press = null;
+    setStatus('', { sticky: true });
+    applyViewGate();
+    updateCursor();
+    refreshOverlay();
+  }
+
   function setTool(key) {
     const def = TOOL_DEFS.find(item => item.key === key);
     if (!def || !def.available) return;
+    // Measurement creation holds the canvas: it ends first (a pending first point is dropped, nothing is written).
+    if (tool !== key && sceneOwnedElsewhere() && typeof els.endOtherScene === 'function') els.endOtherScene();
     const reason = blockedReason();
     if (reason && tool !== key) {
       notice(blockedMessage(reason));
@@ -897,9 +918,11 @@ export function createAnnotationTool({
     hoverDirty = true;
     press = null;
     selectedId = tool ? null : selectedId;
+    if (tool && typeof els.clearMeasurementSelection === 'function') els.clearMeasurementSelection();
     setStatus('', { sticky: true });
     applyViewGate();
     updateCursor();
+    refreshOverlay();
   }
 
   /** Draw mode: a primary drag draws. Move View: it orbits, and no stroke can start. Switching ends any unfinished stroke. */
@@ -1096,7 +1119,6 @@ export function createAnnotationTool({
     }
     clearCargoSelection();
     selectedId = null;
-    clearDeleted();
     const startWorld = picked.world;
     stroke = {
       phase: 'stroking', pointerId: ev.pointerId, pointerType: ev.pointerType || 'mouse', packId: pack.id, epoch: sessionEpoch,
@@ -1299,7 +1321,6 @@ export function createAnnotationTool({
       else UIComponents.showToast('Could not save this drawing.', 'error', { title: 'Annotations' });
       return;
     }
-    clearDeleted();
     hover = null;
     hoverDirty = true;
     // The saved drawing is not selected: the tool stays armed and the next drag starts another one.
@@ -1386,7 +1407,6 @@ export function createAnnotationTool({
       }
       return;
     }
-    clearDeleted();
     arrowTail = null;
     hover = null;
     hoverDirty = true;
@@ -1452,13 +1472,18 @@ export function createAnnotationTool({
       return;
     }
     if (draft) cancelDraft();
+    // Editing a callout ends every armed creator (Arrow, Draw, Re-attach): an unfinished stroke or arrow is cancelled without a
+    // write, and the camera gate Draw holds is released through applyViewGate().
+    cancelStroke();
+    cancelMoveDrag();
     cancelArrowTail();
-    if (tool === 'arrow') {
-      tool = null;
-      hover = null;
-      updateCursor();
-    }
+    tool = null;
+    hover = null;
+    press = null;
     reattachId = null;
+    reattachWhich = null;
+    applyViewGate();
+    updateCursor();
     draft = {
       editId: id,
       hiddenAtOpen: record.hidden === true,
@@ -1476,6 +1501,37 @@ export function createAnnotationTool({
     showEditor();
     setStatus('', { sticky: true });
     refreshOverlay();
+  }
+
+  /**
+   * New Measurement is about to start. The armed Callout, Arrow or Draw tool ends and an open card closes, but an edited card
+   * is discarded only after the owner agrees. Declining keeps the draft and the armed tool; nothing is written.
+   */
+  function releaseForMeasurement() {
+    const finish = () => {
+      cancelStroke();
+      cancelMoveDrag();
+      cancelPinDrag();
+      cancelCardDrag();
+      cancelArrowTail();
+      if (draft) cancelDraft();
+      tool = null;
+      reattachId = null;
+      reattachWhich = null;
+      hover = null;
+      press = null;
+      applyViewGate();
+      updateCursor();
+      visDirty = true;
+      refreshOverlay();
+      return true;
+    };
+    if (!(draft && draftIsDirty())) return Promise.resolve(finish());
+    return confirmDiscard({
+      title: 'Discard changes?',
+      message: 'Starting a measurement closes the open callout editor and discards its unsaved changes.',
+      okLabel: 'Discard and measure',
+    }).then(confirmed => (confirmed ? finish() : false));
   }
 
   function cancelDraft(message = '') {
@@ -1535,7 +1591,6 @@ export function createAnnotationTool({
       }
       id = outcome.annotation.id;
     }
-    clearDeleted();
     const target = anchorTargetName(draft.anchor);
     const wasEdit = Boolean(draft.editId);
     const restore = Boolean(editorParts && editorParts.root.contains(doc.activeElement));
@@ -1554,7 +1609,22 @@ export function createAnnotationTool({
    * swatch that opens the browser's native color picker. `getColor` reads the color being edited (null when nothing
    * is), `onPick` receives the chosen color and `sync` shows a color as the pressed one.
    */
-  function buildColorPicker({ ariaLabel, getColor, onPick }) {
+  /** The color an arrow or drawing is painted with: the picker's live preview for the selected record, otherwise its stored color. */
+  function paintColorOf(record) {
+    return colorPreview && record && colorPreview.id === record.id ? colorPreview.color : record.color;
+  }
+
+  /** Set (or with null, clear) the live color preview of the selected arrow or drawing. Nothing is written. */
+  function setColorPreview(color) {
+    const record = recordById(selectedId);
+    const next = color && (isArrow(record) || isDraw(record)) ? { id: record.id, color } : null;
+    if (colorPreview && next && colorPreview.id === next.id && colorPreview.color === next.color) return;
+    if (!colorPreview && !next) return;
+    colorPreview = next;
+    refreshOverlay();
+  }
+
+  function buildColorPicker({ ariaLabel, getColor, onPick, onPreview }) {
     const root = htmlEl('div', 'tp3d-annot-swatches');
     root.setAttribute('role', 'group');
     root.setAttribute('aria-label', ariaLabel);
@@ -1586,13 +1656,24 @@ export function createAnnotationTool({
       const current = getColor();
       if (current != null && !isCustomAnnotationColor(current) && lastCustomColor) onPick(lastCustomColor);
     });
+    // A native color picker fires `input` for every move of its pointer. Those events only preview the color; the one
+    // completed choice is the `change` event, which writes once (one undoable step), or nothing when it is unchanged.
     customInput.addEventListener('input', () => {
+      if (getColor() == null) return;
+      const picked = customInput.value.toLowerCase();
+      if (!isCustomAnnotationColor(picked)) return;
+      onPreview(picked);
+    });
+    customInput.addEventListener('change', () => {
+      onPreview(null);
       if (getColor() == null) return;
       const picked = customInput.value.toLowerCase();
       if (!isCustomAnnotationColor(picked)) return;
       lastCustomColor = picked;
       onPick(picked);
     });
+    // A picker closed without a change (a cancelled choice) leaves nothing behind.
+    customInput.addEventListener('blur', () => onPreview(null));
     customSwatch.appendChild(customInput);
     root.appendChild(customSwatch);
     function showColor(color) {
@@ -1673,6 +1754,8 @@ export function createAnnotationTool({
     const colorPicker = buildColorPicker({
       ariaLabel: 'Callout color',
       getColor: () => (draft ? draft.color : null),
+      // A callout's color is held in the open draft, which is not stored until Save: it keeps its live preview.
+      onPreview: color => { if (color && draft) { draft.color = color; syncEditorFields({ keepInputs: true }); } },
       onPick: color => {
         draft.color = color;
         syncEditorFields({ keepInputs: true });
@@ -1829,12 +1912,64 @@ export function createAnnotationTool({
     writeHidden(id);
   }
 
+  /** Scrolls the nearest scrolling ancestor just far enough to show a row. Called on a selection change only, never per frame. */
+  function revealRow(row) {
+    if (!row || !row.el.isConnected) return;
+    let scroller = row.el.parentElement;
+    while (scroller && scroller !== doc.body) {
+      if (/(auto|scroll)/.test(doc.defaultView.getComputedStyle(scroller).overflowY) && scroller.scrollHeight > scroller.clientHeight) break;
+      scroller = scroller.parentElement;
+    }
+    if (!scroller || scroller === doc.body) return;
+    const box = scroller.getBoundingClientRect();
+    const item = row.el.getBoundingClientRect();
+    if (box.height === 0) return;
+    if (item.top < box.top) scroller.scrollTop -= box.top - item.top;
+    else if (item.bottom > box.bottom) scroller.scrollTop += item.bottom - box.bottom;
+  }
+
+  /** Opens the inline rename of an arrow or a drawing in its own row. Nothing is written until the name is committed. */
+  function startRename(id) {
+    const reason = blockedReason();
+    if (reason) {
+      notice(blockedMessage(reason));
+      return;
+    }
+    const record = recordById(id);
+    if (!isArrow(record) && !isDraw(record)) return;
+    renamingId = id;
+    renderPanel();
+  }
+
+  /**
+   * Ends an inline rename. A commit writes the name through the same arrow or drawing update as every other look
+   * change; a blank name removes the custom name so the generated one shows again. Escape (commit false) writes nothing.
+   */
+  function finishRename(id, value, commit, { refocus = false } = {}) {
+    if (renamingId !== id) return;
+    renamingId = null;
+    const pack = currentPack();
+    const record = recordById(id);
+    if (commit && pack && record && !blockedReason() && (isArrow(record) || isDraw(record))) {
+      const outcome = isArrow(record)
+        ? PackLibrary.updateArrow(pack.id, id, { name: value })
+        : PackLibrary.updateDraw(pack.id, id, { name: value });
+      if (!outcome.ok) {
+        UIComponents.showToast(`Could not rename this ${isArrow(record) ? 'arrow' : 'drawing'}.`, 'error', { title: 'Annotations' });
+      }
+    }
+    renderPanel();
+    if (refocus) {
+      const row = rows.get(id);
+      if (row && typeof row.edit.focus === 'function') row.edit.focus({ preventScroll: true });
+    }
+  }
+
   function writeHidden(id) {
     if (blockedReason()) return;
     const pack = currentPack();
     const record = recordById(id);
     if (!pack || !(isCallout(record) || isStyled(record))) return;
-    clearDeleted();
     const patch = { hidden: !record.hidden };
     let outcome;
     if (isArrow(record)) outcome = PackLibrary.updateArrow(pack.id, id, patch);
@@ -1863,7 +1998,6 @@ export function createAnnotationTool({
       }
       const pack = currentPack();
       if (!pack) return;
-      clearDeleted();
       const outcome = PackLibrary.updateArrow(pack.id, record.id, patch);
       if (!outcome.ok) UIComponents.showToast('Could not change this arrow.', 'error', { title: 'Annotations' });
       return;
@@ -1891,7 +2025,6 @@ export function createAnnotationTool({
       }
       const pack = currentPack();
       if (!pack) return;
-      clearDeleted();
       const outcome = PackLibrary.updateDraw(pack.id, record.id, patch);
       if (!outcome.ok) UIComponents.showToast('Could not change this drawing.', 'error', { title: 'Annotations' });
       return;
@@ -1989,138 +2122,9 @@ export function createAnnotationTool({
     if (mode === 'off') refocusViewportIfLost();
   }
 
-  // ==========================================================================
-  // SECTION: PRESENT (a viewing mode of this session: nothing in it writes)
-  // ==========================================================================
-  /** Why Present cannot start right now (the text to show), or '' when it can. */
-  function presentRefusal() {
-    const reason = blockedReason();
-    if (reason) return blockedMessage(reason);
-    if (sceneOwnedElsewhere()) return 'Finish measuring before presenting.';
-    // A live drag, gizmo stroke or held case is never abandoned or committed by starting Present: it is finished or cancelled first.
-    if (provisionalPoseActive()) return PRESENT_HELD_NOTICE;
-    if (stroke || pinDrag || cardDrag || editorDrag || reattachId || arrowTail) return PRESENT_BUSY_NOTICE;
-    return '';
-  }
-
   /**
-   * The Present button. An armed tool with nothing in progress is simply put down; an unfinished stroke, arrow, re-attach or
-   * drag is refused. An editor with unsaved changes is only closed after the owner agrees, and declining changes nothing.
-   */
-  function requestPresent() {
-    if (presenting || !panelOpen || !toolShown || showMode === 'off') return;
-    const refusal = presentRefusal();
-    if (refusal) {
-      notice(refusal);
-      return;
-    }
-    if (draft && draftIsDirty()) {
-      const epoch = sessionEpoch;
-      const openDraft = draft;
-      confirmDiscard({
-        title: 'Discard changes?',
-        message: 'Presenting closes the open callout editor and discards its unsaved changes.',
-        okLabel: 'Discard and present',
-      }).then(confirmed => {
-        // The answer belongs to the session and editor that asked: a Load Plan change, a different editor or Show Off in the
-        // meantime makes it void, and anything that began meanwhile still refuses.
-        if (!confirmed || epoch !== sessionEpoch || draft !== openDraft || presenting || showMode === 'off') return;
-        const late = presentRefusal();
-        if (late) notice(late);
-        else beginPresent();
-      });
-      return;
-    }
-    beginPresent();
-  }
-
-  function beginPresent() {
-    if (presenting || !panelOpen || !toolShown || !inEditor() || !currentPack() || presentRefusal()) return;
-    if (draft) cancelDraft();
-    cancelMoveDrag();
-    tool = null;
-    hover = null;
-    press = null;
-    presenting = true;
-    CaseScene.setHover(null);
-    if (typeof els.resetCargoHover === 'function') els.resetCargoHover();
-    applyViewGate();
-    updateCursor();
-    if (els.panel) els.panel.hidden = true; // hidden, not closed: its place, size and state come back as they were
-    syncInputOwnership();
-    const exit = presentExitControl();
-    if (exit) {
-      exit.hidden = false;
-      exit.focus({ preventScroll: true });
-    }
-    setStatus('', { sticky: true });
-    visDirty = true;
-    refreshOverlay();
-  }
-
-  /**
-   * Leave Present: the Exit control goes, the layer takes input again and the panel returns where it was. Nothing was written, so
-   * there is nothing to undo; the selection, Show and Callouts settings are what they were. `panel: false` leaves the panel hidden
-   * (it is closing); `focus` puts keyboard focus back on the Present button. Returns whether Present was on.
-   */
-  function endPresent({ panel = true, focus = false } = {}) {
-    if (!presenting) return false;
-    const exitHadFocus = Boolean(presentExit && doc && presentExit.contains(doc.activeElement));
-    presenting = false;
-    if (presentExit) presentExit.hidden = true;
-    syncInputOwnership();
-    visDirty = true;
-    if (!panel) return true;
-    if (panelOpen && els.panel) els.panel.hidden = false;
-    renderPanel();
-    refreshOverlay();
-    const button = panelParts && panelParts.presentButton;
-    if ((focus || exitHadFocus) && button && !button.disabled && panelOpen) button.focus({ preventScroll: true });
-    else refocusViewportIfLost();
-    return true;
-  }
-
-  /** The "Exit presentation view" button, built the first time Present starts. It is a sibling of the layer, which is inert while presenting. */
-  function presentExitControl() {
-    if (presentExit && presentExit.isConnected) return presentExit;
-    const host = els.layer && els.layer.parentElement;
-    if (!host || !doc) return null;
-    const button = htmlEl('button', 'tp3d-annot-present-exit');
-    button.type = 'button';
-    button.hidden = true;
-    button.title = `${PRESENT_EXIT_LABEL} (Esc)`;
-    button.append(iconEl('fa-solid fa-xmark'), htmlEl('span', '', PRESENT_EXIT_LABEL));
-    button.addEventListener('click', () => endPresent({ focus: true }));
-    host.appendChild(button);
-    presentExit = button;
-    return button;
-  }
-
-  /**
-   * Bottom center of the layer, lifted over whatever already holds that spot (the AutoPack Results card or its restore button, the
-   * review button): a blocker only ever moves it up, so it stays where the owner looks for it, clear of every control that matters.
-   */
-  function placePresentExit(blockers, viewport) {
-    const button = presentExitControl();
-    if (!button) return;
-    if (button.hidden) button.hidden = false;
-    const w = button.offsetWidth;
-    const h = button.offsetHeight;
-    if (!w || !h) return;
-    let rect = { x: (viewport.width - w) / 2, y: viewport.height - PRESENT_EXIT_BOTTOM_PX - h, w, h };
-    for (let pass = 0; pass <= blockers.length; pass += 1) {
-      const current = rect;
-      const hit = blockers.find(box => overlapArea(current, box) > 0);
-      if (!hit) break;
-      rect = { ...current, y: hit.y - PRESENT_EXIT_GAP_PX - h };
-    }
-    rect = clampRect(rect, viewport);
-    const transform = `translate(${rect.x.toFixed(1)}px, ${rect.y.toFixed(1)}px)`;
-    if (button.style.transform !== transform) button.style.transform = transform;
-  }
-
-  /**
-   * A single click deletes: no confirm step, and the one-level Undo button in the panel brings it back.
+   * A single click deletes: no confirm step. The toast only reports it; the shared StateStore Undo (Ctrl/Cmd+Z)
+   * brings it back, in order with cargo, measurement and other annotation edits.
    * Cargo is never touched. Focus only moves on when the delete came from the keyboard.
    */
   function removeAnnotation(id, viaKeyboard = false) {
@@ -2143,18 +2147,13 @@ export function createAnnotationTool({
       reattachWhich = null;
     }
     if (selectedId === id) selectedId = null;
+    collapsedIds.delete(id);
     const outcome = PackLibrary.deleteAnnotation(pack.id, id);
     if (!outcome.ok) {
       renderPanel();
       return;
     }
-    clearDeleted();
-    lastDeleted = { packId: pack.id, record: outcome.removed, index: outcome.index };
-    deletedTimer = window.setTimeout(() => {
-      lastDeleted = null;
-      deletedTimer = null;
-      renderPanel();
-    }, UNDO_VISIBLE_MS);
+    UIComponents.showToast(`${annotationNoun(outcome.removed)} deleted.`, 'info', { title: 'Annotations' });
     setStatus('', { sticky: true });
     if (!viaKeyboard) return;
     const next = records[Math.min(index, records.length - 1)];
@@ -2164,23 +2163,12 @@ export function createAnnotationTool({
     else refocusViewportIfLost();
   }
 
-  /** The panel's one-level Undo for a delete: the same record, ID and position, independent of cargo history. */
-  function undoDelete() {
-    const pending = lastDeleted;
-    if (!pending) return;
-    const reason = blockedReason();
-    if (reason) {
-      notice(blockedMessage(reason));
-      return;
-    }
-    const outcome = PackLibrary.restoreAnnotation(pending.packId, pending.record, pending.index);
-    clearDeleted();
-    if (!outcome.ok) {
-      setStatus(outcome.reason === 'limit' ? 'The annotation limit is reached, so it could not be restored.' : 'It could not be restored.');
-      return;
-    }
-    if (pending.record.type === ANNOTATION_TYPE_CALLOUT || pending.record.type === ANNOTATION_TYPE_ARROW || pending.record.type === ANNOTATION_TYPE_DRAW) adoptSelection(pending.record.id);
-    setStatus('Restored.', { tone: 'success' });
+  /** The noun a toast uses for a record: a callout, an arrow, a drawing or an annotation that could not be read. */
+  function annotationNoun(record) {
+    if (record.type === ANNOTATION_TYPE_CALLOUT) return 'Callout';
+    if (record.type === ANNOTATION_TYPE_ARROW) return 'Arrow';
+    if (record.type === ANNOTATION_TYPE_DRAW) return 'Drawing';
+    return 'Unreadable annotation';
   }
 
   /**
@@ -2243,7 +2231,6 @@ export function createAnnotationTool({
     }
     const record = recordById(id);
     if (!pack || !record) return false;
-    clearDeleted();
     if (isArrow(record)) {
       if (which !== 'start' && which !== 'end') return false;
       const moved = PackLibrary.moveArrowEndpoint(pack.id, id, which, picked.anchor);
@@ -2290,6 +2277,9 @@ export function createAnnotationTool({
       const record = recordById(id);
       const result = resultById(id);
       if (!(which ? isArrow(record) : isCallout(record)) || !result || result.status !== ANNOTATION_STATUS.VALID || blockedReason()) return;
+      // A grip belongs to the selected arrow only. A grip still on screen after another tool was armed, or after the selection
+      // moved on, must never start an edit, whatever the render timing.
+      if (which && (selectedId !== id || tool || sceneOwnedElsewhere())) return;
       poseKey = which ? arrowPoseKey(pack, record) : cargoPoseKey(pack, record.anchor);
     }
     const target = ev.currentTarget || ev.target;
@@ -2421,7 +2411,6 @@ export function createAnnotationTool({
     }
     if (!pack || !recordById(finished.id) || !finished.offset) return;
     const clamp = value => Math.max(-MAX_CARD_OFFSET_PX, Math.min(MAX_CARD_OFFSET_PX, value));
-    clearDeleted();
     const outcome = PackLibrary.setCalloutOffset(pack.id, finished.id, { dx: clamp(finished.offset.dx), dy: clamp(finished.offset.dy) });
     if (!outcome.ok) UIComponents.showToast('Could not move this card.', 'error', { title: 'Annotations' });
     else setStatus('Card moved. The callout stays attached to its cargo.', { tone: 'success' });
@@ -2463,12 +2452,12 @@ export function createAnnotationTool({
   // ==========================================================================
   /**
    * Whether a saved stroke may take a press right now. Derived, never stored: no armed tool or re-attach
-   * (those own the canvas gestures), no unsaved stroke, open editor or other drag, no Present, no Measurement, not Show Off and
+   * (those own the canvas gestures), no unsaved stroke, open editor or other drag, no Measurement, not Show Off and
    * not paused. Each of those either owns the pointer or leaves the strokes out of reach.
    */
   function drawHitReachable() {
     return toolShown && inEditor() && !tool && !reattachId && !stroke && !draft && !pinDrag && !cardDrag &&
-      !presenting && !sceneOwnedElsewhere() && showMode !== 'off' && !blockedReason();
+      !sceneOwnedElsewhere() && showMode !== 'off' && !blockedReason();
   }
 
   /** The same, and no move already under way: what a new press on a stroke needs. */
@@ -2550,7 +2539,19 @@ export function createAnnotationTool({
     if (ev.button !== 0 || ev.isPrimary === false || navigationKeys(ev) || (ev.pointerType !== 'touch' && ev.buttons !== 1)) return false;
     if (heldPointer || !drawHitWanted()) return false;
     const id = drawHitIdAt(ev.clientX, ev.clientY, ev.pointerType);
-    return Boolean(id) && beginDrawPress(ev, id);
+    if (id) return beginDrawPress(ev, id);
+    // The body of the SELECTED Arrow carries the whole arrow. An Arrow that is not selected takes no press: it is selected by a click
+    // (the Editor) and a drag that starts on it stays the camera or cargo drag it was. Its end grips are DOM buttons above the canvas, so
+    // a press on one never gets here.
+    const arrow = selectedArrowBodyAt(ev.clientX, ev.clientY, ev.pointerType);
+    return Boolean(arrow) && beginDrawPress(ev, arrow);
+  }
+
+  /** The id of the selected Arrow when a client position is on its drawn shaft (and no other Arrow's is nearer), else ''. */
+  function selectedArrowBodyAt(clientX, clientY, pointerType) {
+    if (!selectedId || !isArrow(recordById(selectedId))) return '';
+    const hit = arrowHitAt(clientX, clientY, pointerType);
+    return hit && hit.id === selectedId ? selectedId : '';
   }
 
   /** Whether the pointer is one whose press a saved stroke took and has not yet let go: the Editor's hover and cargo handling leave it alone. */
@@ -2558,10 +2559,39 @@ export function createAnnotationTool({
     return Boolean(heldPointer && ev && ev.pointerId === heldPointer.pointerId);
   }
 
+  /**
+   * The saved Arrow whose drawn shaft is nearest a client position, within the pointer's reach: `{ id, distance }` in screen pixels, or
+   * null. A pure query on the line the overlay painted last frame, so nothing is projected here. Only an Arrow drawn in front (the
+   * dashed, occluded ones are not taken) and only while the scene is free: no armed tool, re-attach, open editor, drag or other tool
+   * (the same condition a saved stroke needs). It never claims a press: the Editor selects an Arrow on a click, and a drag that
+   * starts on the shaft stays the camera drag or cargo drag it was.
+   */
+  function arrowHitAt(clientX, clientY, pointerType = 'mouse') {
+    if (!arrowViews.size || !els.layer || !drawHitWanted()) return null;
+    const rect = els.layer.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const reach = DRAW_HIT_REACH_PX[pointerType] || DRAW_HIT_REACH_PX.mouse;
+    let best = null;
+    arrowViews.forEach((view, id) => {
+      if (!view.shown || !view.front || !view.tail || !view.head) return;
+      const distance = distanceToPolyline([view.tail.x, view.tail.y, view.head.x, view.head.y], x, y);
+      if (distance <= reach && (!best || distance < best.distance)) best = { id, distance };
+    });
+    return best;
+  }
+
   /** Whether the pointer is over a stroke's line that a plain press would take (for the grab cursor); touch has no hover. */
   function hoverDrawing(ev) {
     if (!ev || heldPointer || ev.pointerType === 'touch' || navigationKeys(ev) || !drawHitWanted()) return false;
-    return Boolean(drawHitIdAt(ev.clientX, ev.clientY, ev.pointerType));
+    return Boolean(drawHitIdAt(ev.clientX, ev.clientY, ev.pointerType) || selectedArrowBodyAt(ev.clientX, ev.clientY, ev.pointerType));
+  }
+
+  function pointerOverCanvas(x, y) {
+    const canvas = getCanvas();
+    if (!canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
   }
 
   function snapInches(value) {
@@ -2570,7 +2600,16 @@ export function createAnnotationTool({
 
   /** What fixes a stroke's place: the surface it is on, the face and every vertex (a style edit leaves it alone). */
   function moveShapeOf(record) {
-    return JSON.stringify([record.anchor, record.face, record.points]);
+    return isArrow(record) ? JSON.stringify([record.start, record.end]) : JSON.stringify([record.anchor, record.face, record.points]);
+  }
+
+  /** Fingerprint of the committed cargo pose under whatever a whole-object move carries (a stroke's anchor, or both ends of an arrow). */
+  function movePoseKey(pack, record) {
+    return isArrow(record) ? arrowPoseKey(pack, record) : cargoPoseKey(pack, record.anchor);
+  }
+
+  function moveSubject(drag) {
+    return drag && drag.subject === 'arrow' ? 'arrow' : 'drawing';
   }
 
   /**
@@ -2585,17 +2624,21 @@ export function createAnnotationTool({
     const result = resultById(id);
     const pack = currentPack();
     const target = getCanvas();
-    if (!pack || !target || !isDraw(record) || !result || result.status !== ANNOTATION_STATUS.VALID || record.hidden || !isShownByMode(id)) return false;
+    const arrow = isArrow(record);
+    if (!pack || !target || !(arrow || isDraw(record)) || !result || result.status !== ANNOTATION_STATUS.VALID || record.hidden || !isShownByMode(id)) return false;
     keyboardModality = false;
     holdPointer(ev);
-    const surface = provisionalPoseActive() ? null : picker.beginDrawSurface({ anchor: record.anchor, face: record.face }, pack);
+    // A stroke moves along the face its anchor names; an arrow along the one surface BOTH ends share, or not at all.
+    const shared = arrow ? rigidMoveFrame(record.start, record.end) : null;
+    const place = arrow ? (shared.ok ? { anchor: record.start, face: shared.face } : null) : { anchor: record.anchor, face: record.face };
+    const surface = provisionalPoseActive() || !place ? null : picker.beginDrawSurface(place, pack);
     const base = surface ? picker.sampleDrawPlane(surface, ev.clientX, ev.clientY) : null;
-    const view = drawViews.get(id);
+    const view = arrow ? arrowViews.get(id) : drawViews.get(id);
     const movable = Boolean(surface && view && base && base.status === 'ok');
     moveDrag = {
-      id, pointerId: ev.pointerId, pointerType: ev.pointerType || 'mouse', startX: ev.clientX, startY: ev.clientY, lastX: ev.clientX, lastY: ev.clientY, target,
+      id, subject: arrow ? 'arrow' : 'drawing', pair: null, pointerId: ev.pointerId, pointerType: ev.pointerType || 'mouse', startX: ev.clientX, startY: ev.clientY, lastX: ev.clientX, lastY: ev.clientY, target,
       movable, stray: false, moved: false, dirty: false, packId: pack.id, epoch: sessionEpoch, surface, base: movable ? { u: base.u, v: base.v } : null,
-      shape: moveShapeOf(record), poseKey: cargoPoseKey(pack, record.anchor), layoutKey: layoutKey(pack), poseStamp: view ? view.poseStamp : 0,
+      shape: moveShapeOf(record), poseKey: movePoseKey(pack, record), layoutKey: layoutKey(pack), poseStamp: view && !arrow ? view.poseStamp : 0,
       du: 0, dv: 0, rev: 0, valid: true, reason: '', kind: 'ok', verdictKey: '',
     };
     lastClient = { x: ev.clientX, y: ev.clientY };
@@ -2699,6 +2742,8 @@ export function createAnnotationTool({
     if (!drag.moved) {
       if (Math.hypot(ev.clientX - drag.startX, ev.clientY - drag.startY) < PIN_DRAG_THRESHOLD_PX) return;
       if (!drag.movable) { // a stroke that cannot be carried does not take a drag as a click either
+        const stored = drag.subject === 'arrow' ? recordById(drag.id) : null;
+        if (!drag.stray && stored && !rigidMoveFrame(stored.start, stored.end).ok) notice(ARROW_MOVE_UNSUPPORTED);
         drag.stray = true;
         return;
       }
@@ -2724,12 +2769,14 @@ export function createAnnotationTool({
    * cannot take. `provisional` means the Editor now holds a scene-only pose.
    */
   function judgeMove(drag, x, y) {
+    // A whole arrow released off the 3D view is cancelled, never resolved against wherever the ray meets its plane far away.
+    if (drag.subject === 'arrow' && !pointerOverCanvas(x, y)) return { status: 'off', du: drag.du, dv: drag.dv, valid: false, reason: 'view' };
     const sample = picker.sampleDrawPlane(drag.surface, x, y);
     if (sample.status === 'provisional') return { status: 'provisional' };
     if (sample.status !== 'ok') return { status: 'off', du: drag.du, dv: drag.dv, valid: false, reason: 'view' };
     const du = snapInches(sample.u - drag.base.u);
     const dv = snapInches(sample.v - drag.base.v);
-    const verdict = PackLibrary.checkDrawMove(drag.packId, drag.id, du, dv);
+    const verdict = drag.subject === 'arrow' ? PackLibrary.checkArrowMove(drag.packId, drag.id, du, dv) : PackLibrary.checkDrawMove(drag.packId, drag.id, du, dv);
     return { status: 'ok', du, dv, valid: Boolean(verdict.ok), reason: verdict.ok ? '' : verdict.reason };
   }
 
@@ -2739,6 +2786,10 @@ export function createAnnotationTool({
       drag.du = judged.du;
       drag.dv = judged.dv;
       drag.rev += 1;
+      if (drag.subject === 'arrow') {
+        const record = recordById(drag.id);
+        drag.pair = record ? translateAnchorPair(record.start, record.end, drag.du, drag.dv) : null;
+      }
     }
     drag.valid = judged.valid;
     drag.reason = judged.reason;
@@ -2757,14 +2808,28 @@ export function createAnnotationTool({
       cancelMoveDrag(HELD_POSE_NOTICE);
       return;
     }
-    const view = drawViews.get(drag.id);
-    if (!view || !drawableIds.has(drag.id) || !isShownByMode(drag.id)) {
-      cancelMoveDrag('The drawing changed, so the move was cancelled.');
-      return;
-    }
-    if (view.poseStamp !== drag.poseStamp) {
-      cancelMoveDrag('The cargo changed, so the move was cancelled.');
-      return;
+    const subject = moveSubject(drag);
+    if (drag.subject === 'arrow') {
+      const record = recordById(drag.id);
+      const pack = currentPack();
+      if (!record || !drawableIds.has(drag.id) || !isShownByMode(drag.id)) {
+        cancelMoveDrag(`The ${subject} changed, so the move was cancelled.`);
+        return;
+      }
+      if (!pack || movePoseKey(pack, record) !== drag.poseKey) {
+        cancelMoveDrag('The cargo changed, so the move was cancelled.');
+        return;
+      }
+    } else {
+      const view = drawViews.get(drag.id);
+      if (!view || !drawableIds.has(drag.id) || !isShownByMode(drag.id)) {
+        cancelMoveDrag(`The ${subject} changed, so the move was cancelled.`);
+        return;
+      }
+      if (view.poseStamp !== drag.poseStamp) {
+        cancelMoveDrag('The cargo changed, so the move was cancelled.');
+        return;
+      }
     }
     if (!drag.moved || !drag.dirty) return;
     drag.dirty = false;
@@ -2791,6 +2856,7 @@ export function createAnnotationTool({
 
   /** A press that never became a drag is a click: it selects the stroke like its list row does (or deselects it, if it already was). Nothing is written. */
   function clickDrawing(finished) {
+    if (finished.subject === 'arrow') return; // a click on the selected arrow's body leaves it selected, as it always did
     if (finished.stray || !recordById(finished.id) || !drawableIds.has(finished.id) || !drawHitWanted()) return;
     select(finished.id, { toggle: true });
     refocusViewportIfLost();
@@ -2809,33 +2875,35 @@ export function createAnnotationTool({
     }
     const pack = currentPack();
     const record = recordById(finished.id);
-    if (!pack || pack.id !== finished.packId || finished.epoch !== sessionEpoch || !toolShown || showMode === 'off' || presenting ||
+    if (!pack || pack.id !== finished.packId || finished.epoch !== sessionEpoch || !toolShown || showMode === 'off' ||
         sceneOwnedElsewhere() || provisionalPoseActive() || !record || moveShapeOf(record) !== finished.shape) {
-      setStatus('The drawing changed, so the move was cancelled.');
+      setStatus(`The ${moveSubject(finished)} changed, so the move was cancelled.`);
       return;
     }
-    if (cargoPoseKey(pack, record.anchor) !== finished.poseKey || layoutKey(pack) !== finished.layoutKey) {
+    if (movePoseKey(pack, record) !== finished.poseKey || layoutKey(pack) !== finished.layoutKey) {
       setStatus('The cargo changed, so the move was cancelled.');
       return;
     }
+    const arrow = finished.subject === 'arrow';
+    const subject = moveSubject(finished);
+    const refused = arrow ? ARROW_MOVE_REFUSED : DRAW_MOVE_REFUSED;
     if (!judged || judged.status !== 'ok' || !judged.valid) {
-      notice(DRAW_MOVE_REFUSED);
+      notice(refused);
       return;
     }
     if (!judged.du && !judged.dv) {
-      setStatus('The drawing was left where it was.');
+      setStatus(`The ${subject} was left where it was.`);
       return;
     }
-    clearDeleted();
-    const outcome = PackLibrary.moveDraw(pack.id, finished.id, judged.du, judged.dv);
+    const outcome = arrow ? PackLibrary.moveArrow(pack.id, finished.id, judged.du, judged.dv) : PackLibrary.moveDraw(pack.id, finished.id, judged.du, judged.dv);
     if (!outcome.ok) {
-      if (outcome.reason === 'invalid' || outcome.reason === 'unresolved') notice(DRAW_MOVE_REFUSED);
-      else UIComponents.showToast('Could not move this drawing.', 'error', { title: 'Annotations' });
+      if (outcome.reason === 'invalid' || outcome.reason === 'unresolved' || outcome.reason === 'too-short') notice(refused);
+      else UIComponents.showToast(`Could not move this ${subject}.`, 'error', { title: 'Annotations' });
       return;
     }
     adoptSelection(finished.id);
     visDirty = true;
-    setStatus(outcome.unchanged ? 'The drawing was left where it was.' : 'Drawing moved.', { tone: 'success' });
+    setStatus(outcome.unchanged ? `The ${subject} was left where it was.` : (arrow ? 'Arrow moved.' : 'Drawing moved.'), { tone: 'success' });
   }
 
   /** Release everything a move holds. After this no pointer event can reach it, so none can bring it back. */
@@ -2910,7 +2978,7 @@ export function createAnnotationTool({
       if (act && layer.contains(act)) {
         const id = act.closest('.tp3d-annot-card')?.dataset.annotId;
         if (act.dataset.act === 'edit') openEditor(id);
-        else if (act.dataset.act === 'collapse') select(null);
+        else if (act.dataset.act === 'collapse') toggleCollapsed(id);
         return;
       }
       const grip = ev.target.closest && ev.target.closest('.tp3d-annot-handle');
@@ -2922,13 +2990,17 @@ export function createAnnotationTool({
       const pin = ev.target.closest && ev.target.closest('.tp3d-annot-pin');
       if (pin && layer.contains(pin)) {
         if (pin.dataset.annotId === DRAFT_ID) return;
+        endCreation();
         select(pin.dataset.annotId, { toggle: true });
         return;
       }
       const head = ev.target.closest && ev.target.closest('.tp3d-annot-card__head');
       if (head && layer.contains(head)) {
         const id = head.closest('.tp3d-annot-card').dataset.annotId;
-        if (id !== selectedId) select(id);
+        if (id !== selectedId) {
+          endCreation();
+          select(id);
+        }
       }
     });
     layer.addEventListener('pointerover', ev => {
@@ -2953,7 +3025,7 @@ export function createAnnotationTool({
   // SECTION: KEYBOARD OWNERSHIP (capture phase)
   // ==========================================================================
   function ownsEscape() {
-    return Boolean(presenting || stroke || moveDrag || pinDrag || cardDrag || draft || reattachId || arrowTail || tool || selectedId);
+    return Boolean(stroke || moveDrag || pinDrag || cardDrag || draft || reattachId || arrowTail || tool || selectedId);
   }
 
   function onKeyDownCapture(ev) {
@@ -2975,7 +3047,7 @@ export function createAnnotationTool({
       return;
     }
     if (key === 'delete' || key === 'backspace') {
-      if (!selectedId || draft || presenting || isTypingTarget(ev.target)) return; // Present is view-only: nothing is deleted
+      if (!selectedId || draft || isTypingTarget(ev.target)) return;
       const target = ev.target;
       const owned = target === els.viewport || Boolean(els.layer && els.layer.contains(target)) ||
         Boolean(els.panel && els.panel.contains(target));
@@ -2997,11 +3069,6 @@ export function createAnnotationTool({
 
   /** One Escape press closes exactly one owner. */
   function closeOneOwner() {
-    if (presenting) {
-      // Present has nothing else under way (it never starts over a gesture), so leaving it is the whole Escape; the selection stays.
-      endPresent();
-      return;
-    }
     if (stroke) {
       // An unfinished stroke goes before the armed Draw tool does.
       cancelStroke('Drawing cancelled.');
@@ -3096,6 +3163,19 @@ export function createAnnotationTool({
     panel.style.top = `${next.y}px`;
   }
 
+  /**
+   * A dragged panel never settles over the other manager: after a drag, a layout change or an opening, the screen names a clear
+   * spot (`{ x, y }` in this host) or asks for the default place (`'reset'`). Nothing moves when the panel is already clear.
+   */
+  function settle() {
+    if (!els.panel || els.panel.hidden || typeof els.avoidOther !== 'function' || compact) return;
+    const spot = els.avoidOther(els.panel);
+    if (spot === 'reset') panelPosition = null;
+    else if (spot) panelPosition = clampPanelPosition(spot);
+    else return;
+    applyPanelPosition();
+  }
+
   function attachPanelDrag(handle) {
     handle.addEventListener('pointerdown', ev => {
       if (ev.button !== 0 || !els.panel || compact) return;
@@ -3130,6 +3210,7 @@ export function createAnnotationTool({
         window.removeEventListener('pointercancel', onEnd);
         if (els.panel) els.panel.classList.remove('is-dragging');
         if (!moved) return;
+        settle();
         // The click that follows a drag released over the title must not toggle the panel.
         suppressToggleClick = true;
         window.setTimeout(() => { suppressToggleClick = false; }, 0);
@@ -3217,21 +3298,8 @@ export function createAnnotationTool({
     hint.setAttribute('role', 'status');
     hint.setAttribute('aria-live', 'polite');
 
-    const undoBar = htmlEl('div', 'tp3d-annot-panel__undo');
-    undoBar.hidden = true;
-    undoBar.setAttribute('role', 'status');
-    const undoText = htmlEl('span');
-    const undoButton = htmlEl('button', 'tp3d-annot-panel__undo-btn', 'Undo');
-    undoButton.type = 'button';
-    undoButton.addEventListener('click', undoDelete);
-    undoBar.append(undoText, undoButton);
-
     const show = htmlEl('div', 'tp3d-annot-panel__view');
     show.appendChild(htmlEl('span', 'tp3d-annot-panel__view-label', 'Show'));
-    const presentButton = htmlEl('button', 'tp3d-annot-btn tp3d-annot-btn--small tp3d-annot-panel__present', 'Present');
-    presentButton.type = 'button';
-    presentButton.title = 'Hide the panel and editing controls to show the annotations';
-    presentButton.addEventListener('click', requestPresent);
     const showGroup = segmented('Show annotations', 'tp3d-annot-seg--small tp3d-annot-seg--show');
     const showButtons = SHOW_MODES.map(([key, label]) => {
       const button = htmlEl('button', 'tp3d-annot-seg__btn', label);
@@ -3240,9 +3308,10 @@ export function createAnnotationTool({
       showGroup.appendChild(button);
       return { key, button };
     });
-    show.append(showGroup, presentButton);
+    show.append(showGroup);
 
     const view = htmlEl('div', 'tp3d-annot-panel__view');
+    // Visible text stays on one line in the fixed label column; the group keeps the accessible name "Callout display".
     view.appendChild(htmlEl('span', 'tp3d-annot-panel__view-label', 'Callouts'));
     const displayGroup = segmented('Callout display', 'tp3d-annot-seg--small tp3d-annot-seg--display');
     const displayButtons = DISPLAY_MODES.map(([key, label]) => {
@@ -3254,17 +3323,17 @@ export function createAnnotationTool({
     });
     view.appendChild(displayGroup);
 
-    const empty = htmlEl('div', 'tp3d-annot-panel__empty', 'No annotations yet. A callout marks a spot, an arrow points from one place to another, and a drawing is a freehand line. Annotations are notes only and do not change the load.');
+    const empty = htmlEl('div', 'tp3d-annot-panel__empty', 'No annotations yet. Choose a tool above to add one. Annotations never change the load.');
     const warning = htmlEl('div', 'tp3d-annot-panel__notice', "Some saved annotations couldn't be read. The original data is kept until you delete it.");
     warning.hidden = true;
     const list = htmlEl('ul', 'tp3d-annot-panel__list');
-    body.append(toolGroup, drawModeRow, hint, undoBar, show, view, warning, empty, list);
+    body.append(toolGroup, drawModeRow, hint, show, view, warning, empty, list);
 
     els.panel.replaceChildren(head, body);
     rows.clear();
     panelParts = {
       root: els.panel, head, toggle: toggleButton, chevron, count, body,
-      toolButtons, drawModeRow, drawModeButtons, hint, undoBar, undoText, showButtons, presentButton, displayButtons, empty, warning, list,
+      toolButtons, drawModeRow, drawModeButtons, hint, showButtons, displayButtons, empty, warning, list,
       arrowOptions: null, arrowTitle: null, widthButtons: [], arrowColors: null,
       drawOptions: null, drawTitle: null, drawWidthButtons: [], drawStyleButtons: [], drawColors: null,
     };
@@ -3289,6 +3358,13 @@ export function createAnnotationTool({
     const sub = htmlEl('span', 'tp3d-annot-row__sub');
     text.append(name, sub);
     selectButton.append(badge, text);
+    // An arrow or a drawing is renamed in place: this field replaces the name while it is being typed.
+    const nameInput = htmlEl('input', 'tp3d-annot-row__rename');
+    nameInput.type = 'text';
+    nameInput.maxLength = MAX_ANNOTATION_NAME_LENGTH;
+    nameInput.autocomplete = 'off';
+    nameInput.spellcheck = false;
+    nameInput.hidden = true;
     const actions = htmlEl('div', 'tp3d-annot-row__actions');
     const eye = iconButton('tp3d-annot-row__eye', 'fa-solid fa-eye', 'Hide');
     const edit = iconButton('tp3d-annot-row__edit', 'fa-solid fa-pen', 'Edit');
@@ -3313,11 +3389,28 @@ export function createAnnotationTool({
       issue.appendChild(line);
       ends[which] = { line, text: reason, button };
     });
-    el.append(selectButton, actions, issue);
-    const row = { el, select: selectButton, badge, name, sub, eye, edit, remove, issue, issueText, reattach, ends, id: null, eyeIcon: eye.firstChild };
-    selectButton.addEventListener('click', () => select(row.id, { toggle: true }));
+    el.append(selectButton, nameInput, actions, issue);
+    const row = { el, select: selectButton, badge, name, sub, nameInput, eye, edit, remove, issue, issueText, reattach, ends, id: null, eyeIcon: eye.firstChild, renaming: false };
+    // Picking a row from the list ends a pending Arrow tail (an unfinished creation) and leaves the armed tool as it is.
+    selectButton.addEventListener('click', () => {
+      endCreation();
+      select(row.id, { toggle: true });
+    });
     eye.addEventListener('click', () => toggleHidden(row.id));
-    edit.addEventListener('click', () => openEditor(row.id));
+    // The same control edits a callout in the full editor and renames an arrow or a drawing in its row.
+    edit.addEventListener('click', () => (isCallout(recordById(row.id)) ? openEditor(row.id) : startRename(row.id)));
+    // Typing never reaches the scene or the other shortcuts: Enter commits, Escape cancels, leaving the field commits.
+    nameInput.addEventListener('keydown', ev => {
+      ev.stopPropagation();
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        finishRename(row.id, nameInput.value, true, { refocus: true });
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        finishRename(row.id, '', false, { refocus: true });
+      }
+    });
+    nameInput.addEventListener('blur', () => finishRename(row.id, nameInput.value, true));
     // A click event with detail 0 is a keyboard activation (Enter / Space).
     remove.addEventListener('click', ev => removeAnnotation(row.id, ev.detail === 0));
     reattach.addEventListener('click', () => startReattach(row.id));
@@ -3375,7 +3468,7 @@ export function createAnnotationTool({
     row.select.title = callout ? 'Select to show its card' : (arrow ? 'Select to edit its ends, color and width' : (draw ? 'Select to edit its color and width' : ''));
 
     setHidden(row.eye, !supported);
-    setHidden(row.edit, !callout);
+    setHidden(row.edit, !supported);
     row.eye.disabled = blocked;
     row.edit.disabled = blocked || viewOff;
     row.remove.disabled = blocked;
@@ -3386,8 +3479,24 @@ export function createAnnotationTool({
       setAttr(row.eye, 'aria-label', `${hiddenNow ? 'Show' : 'Hide'} ${title}`);
       row.eye.title = hiddenNow ? 'Show' : 'Hide';
     }
-    if (callout) setAttr(row.edit, 'aria-label', `Edit ${title}`);
+    const editVerb = callout ? 'Edit' : 'Rename';
+    row.edit.title = editVerb;
+    setAttr(row.edit, 'aria-label', `${editVerb} ${title}`);
     setAttr(row.remove, 'aria-label', `Delete ${title}`);
+
+    // An arrow or a drawing being renamed shows its name field. The field is filled and focused once, when the rename starts.
+    const renaming = (arrow || draw) && renamingId === record.id;
+    const starting = renaming && !row.renaming;
+    row.renaming = renaming;
+    setHidden(row.nameInput, !renaming);
+    if (starting) {
+      const generated = arrow ? `Arrow ${arrowNumbers.get(record.id) || ''}`.trim() : `Drawing ${drawNumbers.get(record.id) || ''}`.trim();
+      row.nameInput.value = record.name || '';
+      row.nameInput.placeholder = generated;
+      row.nameInput.setAttribute('aria-label', `Name for ${generated}. Leave blank to use that name.`);
+      row.nameInput.focus();
+      row.nameInput.select();
+    }
 
     // A callout reports one reason and one Re-attach; an arrow reports each end that cannot be placed on its own.
     const issueReason = result ? result.reason : 'unreadable';
@@ -3417,7 +3526,7 @@ export function createAnnotationTool({
   /** Context-sensitive guidance: empty unless something is relevant right now. */
   function guidanceText(blockedNow) {
     if (blockedNow) return blockedMessage(blockedNow);
-    if (moveDrag && moveDrag.moved) return DRAW_MOVE_TEXT[moveDrag.kind];
+    if (moveDrag && moveDrag.moved) return (moveDrag.subject === 'arrow' ? ARROW_MOVE_TEXT : DRAW_MOVE_TEXT)[moveDrag.kind];
     if (statusMessage) return statusMessage;
     if (showMode === 'off') return SHOW_OFF_HINT;
     if (pinDrag && pinDrag.moved) return pinDrag.which ? 'Drag the handle onto a surface. Esc cancels.' : 'Drag the marker onto a surface. Esc cancels.';
@@ -3477,7 +3586,6 @@ export function createAnnotationTool({
       button.disabled = Boolean(blockedNow);
     });
     parts.showButtons.forEach(({ key, button }) => setAttr(button, 'aria-pressed', showMode === key ? 'true' : 'false'));
-    parts.presentButton.disabled = showMode === 'off' || Boolean(blockedNow); // nothing to present while Off or paused
     parts.displayButtons.forEach(({ key, button }) => setAttr(button, 'aria-pressed', display === key ? 'true' : 'false'));
 
     const hintText = guidanceText(blockedNow);
@@ -3486,16 +3594,6 @@ export function createAnnotationTool({
     if ((parts.hint.dataset.tone || '') !== hintTone) {
       if (hintTone) parts.hint.dataset.tone = hintTone;
       else delete parts.hint.dataset.tone;
-    }
-    setHidden(parts.undoBar, !lastDeleted);
-    if (lastDeleted) {
-      const deletedType = lastDeleted.record.type;
-      let deletedText = 'Unreadable annotation deleted.';
-      if (deletedType === ANNOTATION_TYPE_CALLOUT) deletedText = 'Callout deleted. Cargo is unchanged.';
-      else if (deletedType === ANNOTATION_TYPE_ARROW) deletedText = 'Arrow deleted. Cargo is unchanged.';
-      else if (deletedType === ANNOTATION_TYPE_DRAW) deletedText = 'Drawing deleted. Cargo is unchanged.';
-      setText(parts.undoText, deletedText);
-      parts.undoBar.querySelector('button').disabled = Boolean(blockedNow);
     }
     setHidden(parts.empty, records.length > 0);
     setHidden(parts.warning, !records.some(record => record.type === ANNOTATION_TYPE_UNREADABLE));
@@ -3517,6 +3615,11 @@ export function createAnnotationTool({
       row.el.remove();
       rows.delete(id);
     });
+    // A record picked from the scene gets its row shown once, when the selection changes. Otherwise the list stays where the user scrolled it.
+    if (selectedId !== revealedId) {
+      revealedId = selectedId;
+      if (selectedId) revealRow(rows.get(selectedId));
+    }
     applyPanelPosition(); // rows or collapsing change the panel size: keep it inside the viewport
     syncPanelFlow();
   }
@@ -3576,6 +3679,7 @@ export function createAnnotationTool({
       ariaLabel: 'Arrow color',
       getColor: () => { const selectedArrow = recordById(selectedId); return isArrow(selectedArrow) ? selectedArrow.color : arrowStyle.color; },
       onPick: color => setArrowStyle({ color }),
+      onPreview: color => setColorPreview(color),
     });
     colors.root.classList.add('tp3d-annot-panel__arrow-colors');
     options.append(title, widthRow, styleRow, colors.root);
@@ -3630,6 +3734,7 @@ export function createAnnotationTool({
       ariaLabel: 'Drawing color',
       getColor: () => { const selectedDraw = recordById(selectedId); return isDraw(selectedDraw) ? selectedDraw.color : drawStyle.color; },
       onPick: color => setDrawStyle({ color }),
+      onPreview: color => setColorPreview(color),
     });
     colors.root.classList.add('tp3d-annot-panel__draw-colors');
     options.append(title, widthRow, styleRow, colors.root);
@@ -3655,7 +3760,7 @@ export function createAnnotationTool({
     const color = editing ? editing.color : drawStyle.color;
     const width = editing ? editing.width : drawStyle.width;
     const lineStyle = editing ? lineStyleOf(editing) : drawStyle.style;
-    setText(parts.drawTitle, editing ? `${drawName(editing.id)} look` : 'New drawings look');
+    setText(parts.drawTitle, editing ? `Drawing: ${drawName(editing.id)} — Selected` : 'New Drawing — Defaults');
     parts.drawColors.sync(color);
     parts.drawWidthButtons.forEach(({ key, button }) => {
       setAttr(button, 'aria-pressed', width === key ? 'true' : 'false');
@@ -3682,7 +3787,7 @@ export function createAnnotationTool({
     const color = editing ? editing.color : arrowStyle.color;
     const width = editing ? editing.width : arrowStyle.width;
     const lineStyle = editing ? lineStyleOf(editing) : arrowStyle.style;
-    setText(parts.arrowTitle, editing ? `${arrowName(editing.id)} look` : 'New arrows look');
+    setText(parts.arrowTitle, editing ? `Arrow: ${arrowName(editing.id)} — Selected` : 'New Arrow — Defaults');
     parts.arrowColors.sync(color);
     parts.widthButtons.forEach(({ key, button }) => {
       setAttr(button, 'aria-pressed', width === key ? 'true' : 'false');
@@ -3714,10 +3819,8 @@ export function createAnnotationTool({
         hover = null;
         updateCursor();
       }
-      clearDeleted();
       selectedId = null; // hidden graphics leave nothing selected
       visDirty = true;
-      endPresent(); // nothing is drawn while paused, so the Exit control must not be left behind
     }
     applyViewGate();
     renderPanel();
@@ -3734,15 +3837,12 @@ export function createAnnotationTool({
     const owned = sceneOwnedElsewhere();
     if (els.layer) {
       toggleClass(els.layer, 'is-view-only', owned);
-      toggleClass(els.layer, 'is-presenting', presenting);
-      // Present is a view too: markers and cards take no input, so a click or drag goes to the canvas underneath.
-      const inert = owned || presenting;
+      const inert = owned;
       if ('inert' in els.layer && els.layer.inert !== inert) els.layer.inert = inert;
     }
     if (owned === lastOwnedElsewhere) return;
     lastOwnedElsewhere = owned;
     if (!owned) return;
-    endPresent();
     cancelStroke();
     cancelMoveDrag();
     cancelPinDrag();
@@ -3768,7 +3868,7 @@ export function createAnnotationTool({
 
   function wantsLoop() {
     return bound && toolShown && inEditor() && Boolean(currentPack()) &&
-      (panelOpen || presenting || draft || tool || reattachId || pinDrag || cardDrag || stroke || moveDrag || drawableIds.size > 0);
+      (panelOpen || draft || tool || reattachId || pinDrag || cardDrag || stroke || moveDrag || drawableIds.size > 0);
   }
 
   function ensureLoop() {
@@ -4311,7 +4411,7 @@ export function createAnnotationTool({
     entries.forEach(({ record, view, selected }) => {
       const moving = Boolean(moveDrag && moveDrag.moved && moveDrag.id === record.id);
       paintDraw(view.graphic, view.d, {
-        color: record.color, width: record.width, style: lineStyleOf(record), selected: selected && !presenting,
+        color: paintColorOf(record), width: record.width, style: lineStyleOf(record), selected: selected,
         occluded: !view.front && !moving, moving, invalid: moving && !moveDrag.valid, span: view.extent.span,
       });
     });
@@ -4400,8 +4500,11 @@ export function createAnnotationTool({
     if (!shape) return;
     setAttr(graphic.group, 'data-line-style', style);
     const halo = selected && !occluded ? 2 : 4;
+    // A Dotted shaft gets the same neutral edge as a Dotted drawing (DRAW_EDGE_PX.dotted, 1.5 px in total), so the dots read alike.
+    // The head keeps its own halo: it is solid, and it is what shows the direction.
+    const shaftHalo = style === 'dotted' && !(selected && !occluded) ? ARROW_DOTTED_HALO_PX : halo;
     setStyleProp(graphic.shaft, 'strokeWidth', `${shape.shaftWidth}px`);
-    setStyleProp(graphic.under, 'strokeWidth', `${shape.shaftWidth + halo}px`);
+    setStyleProp(graphic.under, 'strokeWidth', `${shape.shaftWidth + shaftHalo}px`);
     setStyleProp(graphic.underHead, 'strokeWidth', `${halo}px`);
     // Only the shaft and its halo take the pattern; the head and its halo stay solid so the direction always reads.
     paintLinePattern(graphic, style, shape.shaftWidth, graphic.shaft, graphic.under);
@@ -4423,7 +4526,7 @@ export function createAnnotationTool({
         els.layer.appendChild(el);
         grips[which] = { el, key: '' };
       });
-      view = { id, graphic, grips, startWorld: new THREE.Vector3(), endWorld: new THREE.Vector3(), front: true, measured: false, shown: false };
+      view = { id, graphic, grips, startWorld: new THREE.Vector3(), endWorld: new THREE.Vector3(), front: true, measured: false, shown: false, tail: null, head: null };
       arrowViews.set(id, view);
       visDirty = true;
     }
@@ -4477,6 +4580,11 @@ export function createAnnotationTool({
     return shape ? { shape, tail, head, tailClipped, headClipped } : null;
   }
 
+  /** A shifted non-cargo anchor's own position, for the live preview of a carried arrow (cargo anchors follow their live group instead). */
+  function carriedPoint(anchor) {
+    return anchor.kind === 'cargo' ? null : anchor.position;
+  }
+
   /**
    * Which arrows are drawn this frame and where they project. An arrow is drawn only while it is Valid (both ends
    * resolve), not hidden, shown by the Show mode, still at least the minimum length apart as the scene displays
@@ -4498,8 +4606,14 @@ export function createAnnotationTool({
       const result = results[index];
       const candidate = pinDrag && pinDrag.moved && pinDrag.id === record.id && pinDrag.which && pinDrag.candidate ? pinDrag.candidate : null;
       // The end being dragged follows the surface under the pointer; everything else follows the displayed scene.
-      const startOk = candidate && pinDrag.which === 'start' ? view.startWorld.copy(candidate.world) : liveAnchorWorld(record.start, result.start, view.startWorld);
-      const endOk = candidate && pinDrag.which === 'end' ? view.endWorld.copy(candidate.world) : liveAnchorWorld(record.end, result.end, view.endWorld);
+      // A whole-arrow move shows both ends at the live offset: the shifted anchors, from the same pure move the write uses.
+      const carried = moveDrag && moveDrag.moved && moveDrag.subject === 'arrow' && moveDrag.id === record.id && moveDrag.pair ? moveDrag.pair : null;
+      const startAnchor = carried ? carried.start : record.start;
+      const endAnchor = carried ? carried.end : record.end;
+      const startOk = candidate && pinDrag.which === 'start' ? view.startWorld.copy(candidate.world)
+        : liveAnchorWorld(startAnchor, carried ? carriedPoint(startAnchor) : result.start, view.startWorld);
+      const endOk = candidate && pinDrag.which === 'end' ? view.endWorld.copy(candidate.world)
+        : liveAnchorWorld(endAnchor, carried ? carriedPoint(endAnchor) : result.end, view.endWorld);
       if (!startOk || !endOk || view.startWorld.distanceTo(view.endWorld) / scale < MIN_ARROW_LENGTH_INCHES) {
         hideArrowView(view);
         return;
@@ -4535,9 +4649,14 @@ export function createAnnotationTool({
   function drawArrows(entries, width, height) {
     const gripsAllowed = !isActive() && !sceneOwnedElsewhere();
     entries.forEach(({ record, view, projection, selected: isSelected }) => {
-      const selected = isSelected && !presenting; // Present draws the saved look: no selected edge, no end handles
-      paintArrow(view.graphic, projection.shape, { color: record.color, style: lineStyleOf(record), selected, occluded: !view.front });
+      const selected = isSelected;
+      // A whole-arrow move that cannot be dropped where the pointer is shows the arrow as the dashed, behind-cargo look.
+      const refused = Boolean(moveDrag && moveDrag.moved && moveDrag.subject === 'arrow' && moveDrag.id === record.id && !moveDrag.valid);
+      paintArrow(view.graphic, projection.shape, { color: paintColorOf(record), style: lineStyleOf(record), selected, occluded: !view.front || refused });
       view.shown = true;
+      // Kept for the Editor's click test: the layer pixels of the shaft exactly as it was just painted.
+      view.tail = projection.tail;
+      view.head = projection.head;
       ['start', 'end'].forEach(which => {
         const screen = which === 'start' ? projection.tail : projection.head;
         const clipped = which === 'start' ? projection.tailClipped : projection.headClipped;
@@ -4608,9 +4727,8 @@ export function createAnnotationTool({
     const collapse = htmlEl('button', 'tp3d-annot-card__btn');
     collapse.type = 'button';
     collapse.dataset.act = 'collapse';
-    collapse.title = 'Collapse callout';
-    collapse.setAttribute('aria-label', 'Collapse callout');
-    collapse.appendChild(iconEl('fa-solid fa-chevron-up'));
+    const chevron = iconEl('fa-solid fa-chevron-up');
+    collapse.appendChild(chevron);
     head.append(swatch, title, edit, collapse);
     const desc = htmlEl('div', 'tp3d-annot-card__desc');
     const foot = htmlEl('div', 'tp3d-annot-card__foot');
@@ -4619,7 +4737,7 @@ export function createAnnotationTool({
     foot.append(iconEl('fa-solid fa-cube'), target, behind);
     card.append(head, desc, foot);
     els.layer.appendChild(card);
-    return { card, swatch, title, edit, collapse, desc, target, behind };
+    return { card, swatch, title, edit, collapse, chevron, desc, foot, target, behind };
   }
 
   function getView(id) {
@@ -4811,7 +4929,8 @@ export function createAnnotationTool({
     const parts = view.cardParts;
     const { record } = entry;
     const targetName = anchorTargetName(record.anchor);
-    const key = `${record.title}\n${record.description || ''}\n${record.color}\n${entry.number}\n${targetName}\n${cardW}`;
+    const collapsed = collapsedIds.has(record.id);
+    const key = `${record.title}\n${record.description || ''}\n${record.color}\n${entry.number}\n${targetName}\n${cardW}\n${collapsed}`;
     const wasHidden = parts.card.hidden;
     if (wasHidden) parts.card.hidden = false;
     if (view.cardKey !== key) {
@@ -4822,15 +4941,24 @@ export function createAnnotationTool({
       setText(parts.swatch, String(entry.number));
       setText(parts.title, record.title);
       setText(parts.desc, record.description || '');
-      setHidden(parts.desc, !record.description);
       setText(parts.target, targetName);
+      // A folded card keeps only its header: the title and swatch stay, the body and footer are hidden.
+      toggleClass(parts.card, 'is-collapsed', collapsed);
+      setHidden(parts.desc, collapsed || !record.description);
+      setHidden(parts.foot, collapsed);
+      parts.chevron.className = `fa-solid fa-chevron-${collapsed ? 'down' : 'up'}`;
+      const foldLabel = `${collapsed ? 'Expand' : 'Collapse'} callout`;
+      setAttr(parts.collapse, 'aria-label', foldLabel);
+      setAttr(parts.collapse, 'title', foldLabel);
+      setAttr(parts.collapse, 'aria-expanded', collapsed ? 'false' : 'true');
       view.cardSize = null;
     }
     toggleClass(parts.card, 'is-selected', selected);
     toggleClass(parts.card, 'is-behind', behind);
     setHidden(parts.behind, !behind);
-    setHidden(parts.edit, !selected);
-    setHidden(parts.collapse, !selected);
+    setHidden(parts.edit, !selected || collapsed);
+    // The fold control stays for a selected callout and for a folded one, so a folded card can always be opened again.
+    setHidden(parts.collapse, !selected && !collapsed);
     if (!view.cardSize || view.cardSize.w !== cardW) {
       // Measured once per content change (not per frame): the placement needs the real height.
       view.cardSize = { w: cardW, h: parts.card.offsetHeight || estimateCardHeight(record.description, cardW) };
@@ -4973,8 +5101,10 @@ export function createAnnotationTool({
 
     // 3. Which cards are shown: selected, kept expanded and (in Cards mode) every visible one, within a budget.
     const editingId = draft && draft.editId;
+    // A folded callout keeps its header in every display mode, so Markers and Labels never hide it on its own.
     const wantsCard = entry => entry.record.id !== editingId &&
-      (entry.selected || entry.record.keepExpanded || display === 'cards') && (entry.view.front || entry.selected || entry.record.keepExpanded);
+      (entry.selected || entry.record.keepExpanded || collapsedIds.has(entry.record.id) || display === 'cards') &&
+      (entry.view.front || entry.selected || entry.record.keepExpanded || collapsedIds.has(entry.record.id));
     const candidates = entries.filter(wantsCard).sort((a, b) =>
       (Number(b.selected) - Number(a.selected)) ||
       (Number(b.record.keepExpanded) - Number(a.record.keepExpanded)) ||
@@ -4988,7 +5118,6 @@ export function createAnnotationTool({
     const pinRects = entries.map(entry => ({ id: entry.record.id, x: entry.view.screen.x - PIN_RECT_PX / 2, y: entry.view.screen.y - PIN_RECT_PX / 2, w: PIN_RECT_PX, h: PIN_RECT_PX }));
     const resultsBox = resultsObstacles();
     fitPanel(resultsBox, viewport);
-    if (presenting) placePresentExit(resultsBox.concat(statusObstacle()), viewport);
     const panelBox = panelObstacle(resultsBox);
     const labelIds = display === 'markers' ? new Set() : fitLabels(
       entries.filter(entry => entry.view.front && !shownIds.has(entry.record.id))
@@ -4997,9 +5126,8 @@ export function createAnnotationTool({
       panelBox ? pinRects.concat(panelBox.map(box => ({ id: '', ...box }))) : pinRects, width);
     entries.forEach(entry => {
       const showLabel = labelIds.has(entry.record.id);
-      // Present keeps the selection (Show Selected still follows it) but draws none of its chrome: the saved look only.
       updatePin(entry.view, entry, {
-        selected: entry.selected && !presenting,
+        selected: entry.selected,
         hollow: !entry.view.front && !entry.selected,
         dragging: entry.dragging,
         chipText: showLabel ? entry.record.title : '',
@@ -5011,7 +5139,7 @@ export function createAnnotationTool({
     const activeLeaders = new Set();
     shown.forEach(entry => {
       const { view, record } = entry;
-      const size = updateCardContent(view, entry, cardW, !view.front, entry.selected && !presenting);
+      const size = updateCardContent(view, entry, cardW, !view.front, entry.selected);
       const marker = { x: view.screen.x, y: view.screen.y };
       let rect;
       if (cardDrag && cardDrag.id === record.id && cardDrag.rect) {
@@ -5019,7 +5147,8 @@ export function createAnnotationTool({
       } else if (record.offset) {
         rect = rectFromOffset(marker, record.offset, size, viewport);
       } else {
-        const occupied = [...pinRects.filter(pinRect => pinRect.id !== record.id), ...placed, ...(panelBox || [])];
+        // A saved card also keeps clear of the camera and zoom stack, so its Edit and Collapse buttons stay reachable.
+        const occupied = [...pinRects.filter(pinRect => pinRect.id !== record.id), ...placed, ...(panelBox || []), ...controlsObstacle()];
         const auto = autoPlace({ marker, size, viewport, occupied, previousSlot: view.slot });
         view.slot = auto.slot;
         rect = { x: auto.x, y: auto.y, w: auto.w, h: auto.h };
@@ -5032,7 +5161,7 @@ export function createAnnotationTool({
       const d = line ? `M${line.x1.toFixed(1)} ${line.y1.toFixed(1)}L${line.x2.toFixed(1)} ${line.y2.toFixed(1)}` : '';
       setPath(leader.under, d);
       setPath(leader.line, d);
-      toggleClass(leader.line, 'is-selected', entry.selected && !presenting);
+      toggleClass(leader.line, 'is-selected', entry.selected);
     });
     entries.forEach(entry => {
       if (shownIds.has(entry.record.id)) return;
@@ -5050,7 +5179,7 @@ export function createAnnotationTool({
     });
 
     // 5. The overflow notice, the new-callout marker and editor card, the hover mark and its tip, the drag ghost.
-    setHidden(parts.overflow, overflow <= 0 || presenting);
+    setHidden(parts.overflow, overflow <= 0);
     if (overflow > 0) {
       setText(parts.overflowText, `${overflow} more ${overflow === 1 ? 'callout is' : 'callouts are'} shown without a card. Zoom in or hide some to see their cards.`);
     }
@@ -5415,11 +5544,12 @@ export function createAnnotationTool({
     togglePanel,
     syncVisibility,
     isPanelOpen: () => panelOpen,
+    releaseForMeasurement,
+    settle,
     isActive,
     hasDraft: () => Boolean(draft),
     // 'off' | 'armed' | 'move' | 'stroking' | 'frozen': read-only, for the Editor and tests.
     // Read-only, for the Editor's interaction routing: while true, cargo is never selected, dragged, highlighted or edited from the viewport.
-    isPresenting: () => presenting,
     drawingState: () => (stroke ? stroke.phase : (tool === 'draw' ? (drawView === 'move' ? 'move' : 'armed') : 'off')),
     // 'idle' | 'pressed' (a press on a saved drawing, not yet a drag) | 'moving' | 'blocked' (carried to a place it cannot take): read-only, for tests.
     moveState: () => (moveDrag ? (moveDrag.moved ? (moveDrag.valid ? 'moving' : 'blocked') : 'pressed') : 'idle'),
@@ -5428,6 +5558,9 @@ export function createAnnotationTool({
     claimPress,
     ownsPointer,
     hoverDrawing,
+    // A saved Arrow has no pointer target of its own: the Editor asks which one a click is on, then selects it.
+    arrowHitAt,
+    select,
     onPointerDown,
     onPointerMove,
     onPointerCancel,

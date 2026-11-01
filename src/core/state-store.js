@@ -19,13 +19,15 @@ let state = null;
 let history = [];
 let historyPointer = -1;
 const subscribers = [];
-// Latest authored-content edit time per Load Plan. Measurement and annotation edits are deliberately
-// outside cargo history, so Undo/Redo must not roll `lastEdited` back past them. History is in-memory and
-// session-scoped, so this watermark is too; it is cleared whenever history is reset.
-const measurementEditMarks = new Map();
-// Per-Load-Plan collections of authored content that live outside cargo history: Undo/Redo keeps the
-// current collection of each (see restoreCargoHistory).
-const AUTHORED_COLLECTIONS = Object.freeze(['measurements', 'annotations']);
+// Pack fields that describe the current view, not the authored history: Undo/Redo keeps the current value
+// (a stale camera must never come back with an old entry).
+const CURRENT_PACK_FIELDS = Object.freeze(['editorView']);
+// A derived preview depicts the cargo of the history entry it was captured for, so Undo/Redo restore the
+// preview that entry holds. Automatic captures add no step: set() carries them into the entry that is current.
+const PREVIEW_PACK_FIELDS = Object.freeze([
+  'thumbnail', 'thumbnailRenderVersion', 'thumbnailUpdatedAt', 'thumbnailSource',
+  'thumbnailVisualSignature', 'thumbnailViewSignature',
+]);
 
 function historySlice(s) {
   return deepClone({
@@ -48,7 +50,6 @@ function init(initialState) {
   state = deepClone(withWorkspaceDefaults(initialState));
   history = [historySlice(state)];
   historyPointer = 0;
-  measurementEditMarks.clear();
 }
 
 function get(key) {
@@ -68,7 +69,24 @@ function set(patch, options = {}) {
   }
   state = next;
   if (significant) pushHistory(historySlice(next));
+  else carryPreviewIntoCurrentEntry(next, options.notification);
   if (!options.skipNotify) notify(patch, state, options.notification);
+}
+
+// A derived preview write (automatic capture, no history step) belongs to the state it was captured for, which
+// is the entry that is current when it lands. Only that Pack's preview fields go into that one entry, so no
+// step is added, Redo is untouched, and Undo/Redo later bring back the image that matches the restored cargo.
+// The write is trusted only when it is the exact Pack object this set() just placed in the state.
+function carryPreviewIntoCurrentEntry(nextState, notification) {
+  if (notification?.type !== 'pack-preview') return;
+  const written = notification.pack;
+  if (!written || typeof written !== 'object' || !written.id) return;
+  if (!(nextState.packLibrary || []).includes(written)) return;
+  const entryPack = (history[historyPointer]?.packLibrary || []).find(pack => pack && pack.id === written.id);
+  if (!entryPack) return;
+  PREVIEW_PACK_FIELDS.forEach(key => {
+    if (Object.hasOwn(written, key)) entryPack[key] = deepClone(written[key]);
+  });
 }
 
 function replace(nextState, options = {}) {
@@ -76,7 +94,6 @@ function replace(nextState, options = {}) {
   if (options.resetHistory) {
     history = [historySlice(state)];
     historyPointer = 0;
-    measurementEditMarks.clear();
   } else if (!options.skipHistory) {
     pushHistory(historySlice(state));
   }
@@ -90,19 +107,6 @@ function snapshot() {
 function resetHistory() {
   history = [historySlice(state)];
   historyPointer = 0;
-  measurementEditMarks.clear();
-}
-
-/** Record that a Load Plan's measurements were edited outside cargo history (see restoreCargoHistory). */
-function markMeasurementEdit(packId, editedAt) {
-  if (!packId) return;
-  const time = Number(editedAt);
-  if (Number.isFinite(time)) measurementEditMarks.set(String(packId), time);
-}
-
-/** Same watermark for annotation edits, which are equally outside cargo history. */
-function markAnnotationEdit(packId, editedAt) {
-  markMeasurementEdit(packId, editedAt);
 }
 
 function pushHistory(entry) {
@@ -114,27 +118,25 @@ function pushHistory(entry) {
 
 function restoreCargoHistory(entry) {
   const restored = deepClone(entry);
-  const currentViews = new Map((state.packLibrary || [])
-    .filter(pack => pack && pack.id && Object.hasOwn(pack, 'editorView'))
-    .map(pack => [pack.id, pack.editorView]));
-  // Measurements and annotations are authored Load Plan content that lives outside cargo history:
-  // Undo/Redo keeps the current collection of each (so deleting cargo and undoing it re-resolves the
-  // same anchors) and never moves `lastEdited` back past an edit to either.
-  const currentCollections = AUTHORED_COLLECTIONS.map(key => /** @type {[string, Map<any, any>]} */ ([key, new Map((state.packLibrary || [])
-    .filter(pack => pack && pack.id && Object.hasOwn(pack, key))
-    .map(pack => [pack.id, pack[key]]))]));
+  const currentPacks = new Map((state.packLibrary || []).filter(pack => pack && pack.id).map(pack => [pack.id, pack]));
   restored.packLibrary = (restored.packLibrary || []).map(pack => {
     if (!pack || typeof pack !== 'object') return pack;
-    let next = pack;
-    if (currentViews.has(pack.id)) next = { ...next, editorView: deepClone(currentViews.get(pack.id)) };
-    currentCollections.forEach(([key, byPack]) => {
-      if (byPack.has(pack.id)) next = { ...next, [key]: deepClone(byPack.get(pack.id)) };
+    const current = currentPacks.get(pack.id);
+    if (!current) return pack;
+    // The whole recorded Pack comes from the entry (cargo, measurements, annotations, lastEdited, preview).
+    // Only the camera stays current.
+    const next = { ...pack };
+    CURRENT_PACK_FIELDS.forEach(key => {
+      if (Object.hasOwn(current, key)) next[key] = deepClone(current[key]);
     });
-    const editedAt = measurementEditMarks.get(String(pack.id));
-    if (Number.isFinite(editedAt) && !(Number(next.lastEdited) >= editedAt)) next = { ...next, lastEdited: editedAt };
     return next;
   });
   return restored;
+}
+
+/** How many steps Undo can take back right now (read-only: the state is not touched). */
+function undoDepth() {
+  return historyPointer;
 }
 
 function undo() {
@@ -177,4 +179,4 @@ function isSignificantChange(patch) {
   return keys.some(k => significant.includes(k));
 }
 
-export { init, get, set, replace, snapshot, resetHistory, markMeasurementEdit, markAnnotationEdit, undo, redo, subscribe };
+export { init, get, set, replace, snapshot, resetHistory, undoDepth, undo, redo, subscribe };

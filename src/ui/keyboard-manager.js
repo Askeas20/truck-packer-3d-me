@@ -23,12 +23,6 @@ export function createKeyboardManager({
   Utils,
 }) {
   let shortcuts = {};
-  // Keys that delete, duplicate, paste, undo or redo cargo, or select it all.
-  const CARGO_SHORTCUTS = new Set([
-    'delete', 'backspace', 'meta+d', 'ctrl+d', 'meta+v', 'ctrl+v', 'meta+a', 'ctrl+a',
-    'meta+z', 'ctrl+z', 'meta+shift+z', 'ctrl+shift+z',
-  ]);
-
   const KeyboardManager = (() => {
     let clipboard = null;
 
@@ -47,9 +41,6 @@ export function createKeyboardManager({
       if (event.defaultPrevented || UIComponents.modalOwnership?.blocksKeyboardEvent(event)) return;
       if (isTypingContext(event)) return;
       const key = buildKeyString(event);
-      // Annotation Present is a view: the shortcuts that change or select cargo wait until it ends. Escape, the copy
-      // command and the view toggles (grid, shadows) are not among them.
-      if (CARGO_SHORTCUTS.has(key) && InteractionManager.isCargoReadOnly && InteractionManager.isCargoReadOnly()) return;
       const interactionSurface = document.getElementById('viewport');
       const spatialKey = ['delete', 'backspace', 'g', 's'].includes(key);
       if (spatialKey && (!inEditor() || event.target !== interactionSurface)) return;

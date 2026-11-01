@@ -1,9 +1,10 @@
 /**
  * @file annotation-lifecycle.spec.mjs
  * @description Pins how Annotations V1 data lives inside a Load Plan: the normalizer whitelist, writes that
- *   stay outside cargo Undo/Redo and never roll `lastEdited` back, derived validity when cargo, Cases or the
- *   truck change, duplicate and import instance-ID remapping, and export/backup projection plus strict
- *   restore validation. The pure model and layout are pinned in annotation-core.spec.mjs.
+ *   are Undo/Redo steps in the same chronological history as cargo edits and restore their exact
+ *   `lastEdited`, derived validity when cargo, Cases or the truck change, duplicate and import instance-ID
+ *   remapping, and export/backup projection plus strict restore validation. The pure model and layout are
+ *   pinned in annotation-core.spec.mjs.
  */
 
 import test from 'node:test';
@@ -59,10 +60,24 @@ const snapshotOf = () => JSON.stringify([StateStore.get('packLibrary'), StateSto
 const emptyDestination = () => StateStore.init({
   currentScreen: 'packs', currentPackId: null, caseLibrary: [CASE], folderLibrary: [], preferences: {}, packLibrary: [],
 });
+// A strictly increasing clock: every write gets its own, later `lastEdited`, so each step's exact time can be asserted.
+const tickingClock = t => {
+  let now = 1000;
+  t.mock.method(Date, 'now', () => (now += 10));
+};
 
 // ============================================================================
 // SECTION: NORMALIZATION (G1) AND RECOVERY
 // ============================================================================
+
+// The one step that the last committed write made: Undo reverts exactly that write, and Redo restores exactly its result.
+function oneStepRoundTrip(label) {
+  const after = JSON.stringify(StateStore.get('packLibrary'));
+  assert.equal(StateStore.undo(), true, `${label}: one Undo step`);
+  assert.notEqual(JSON.stringify(StateStore.get('packLibrary')), after, `${label}: Undo reverts it`);
+  assert.equal(StateStore.redo(), true, `${label}: Redo replays it`);
+  assert.equal(JSON.stringify(StateStore.get('packLibrary')), after, `${label}: Redo restores the result`);
+}
 
 test('normalizePack whitelists annotations: legacy plans get [], valid ones persist, malformed ones are kept as recovery records', () => {
   assert.deepEqual(normalizePack(makePack('A')).annotations, [], 'a plan saved before the feature has none');
@@ -99,7 +114,7 @@ test('a write keeps unreadable originals verbatim and an unrelated edit never to
 // SECTION: WRITES (G2) — annotation-only edits
 // ============================================================================
 
-test('create, edit, move, hide and delete are annotation-only edits: lastEdited moves, cargo Undo does not', () => {
+test('create, edit, move, hide and delete are undoable steps: lastEdited moves, and each step reverts exactly once', () => {
   seed();
   const notifications = [];
   const unsubscribe = StateStore.subscribe((_changes, _state, notification) => {
@@ -112,7 +127,7 @@ test('create, edit, move, hide and delete are annotation-only edits: lastEdited 
     assert.equal(added.ok, true);
     assert.equal(notifications.at(-1), 'pack-annotations', 'derived notification: the app refreshes only the overlay and list');
     assert.ok(stored('A').lastEdited > before.lastEdited, 'creating a callout updates lastEdited');
-    assert.equal(StateStore.undo(), false, 'and adds no cargo Undo step');
+    oneStepRoundTrip('the write');
     assert.equal(stored('B').annotations, undefined, 'another Load Plan is untouched');
     assert.equal(JSON.stringify(stored('A').cases), cargoBefore, 'cargo is untouched');
     const [record] = PackLibrary.getAnnotations('A');
@@ -150,7 +165,7 @@ test('create, edit, move, hide and delete are annotation-only edits: lastEdited 
     assert.equal(PackLibrary.reattachCallout('A', id, { kind: 'space', surface: 'sky', position: { x: 0, y: 0, z: 0 } }).reason, 'invalid');
     assert.equal(PackLibrary.reattachCallout('A', id, { ...cargoAnchor, local: { x: 0, y: 0, z: 0 } }).reason, 'invalid', 'a point off the cargo surface is refused');
     assert.equal(PackLibrary.getAnnotations('A')[0].anchor.kind, 'cargo', 'refused moves change nothing');
-    assert.equal(StateStore.undo(), false, 'no edit added a cargo Undo step');
+    oneStepRoundTrip('the last edit');
 
     assert.equal(PackLibrary.deleteAnnotation('A', 'nope').reason, 'not-found');
     assert.equal(PackLibrary.deleteAnnotation('A', id).ok, true);
@@ -172,23 +187,37 @@ test('the per-plan maximum of 200 is enforced on creation and a malformed callou
   assert.equal(PackLibrary.restoreAnnotation('A', callout('late'), 0).reason, 'limit');
 });
 
-test('cargo Undo/Redo keeps annotations and never rolls lastEdited back past an annotation edit', () => {
+test('cargo and callout edits undo and redo in order, each restoring its exact lastEdited', t => {
+  tickingClock(t);
   seed();
   PackLibrary.addCallout('A', note('First'));
+  const afterFirst = stored('A').lastEdited;
   StateStore.set({ packLibrary: StateStore.get('packLibrary').map(p => (p.id === 'A' ? { ...p, notes: 'cargo edit' } : p)) });
   const second = PackLibrary.addCallout('A', note('Second', ground(5, 5)));
   assert.equal(second.ok, true);
+  const afterSecond = stored('A').lastEdited;
   PackLibrary.setCalloutOffset('A', second.annotation.id, { dx: 20, dy: 20 });
-  const editedAt = stored('A').lastEdited;
-  assert.equal(StateStore.undo(), true, 'the cargo edit is undone');
+  const afterMove = stored('A').lastEdited;
+  assert.ok(123 < afterFirst && afterFirst < afterSecond && afterSecond < afterMove, 'each callout edit has its own, later time');
+  // Newest first: the card move, then the second callout, then the cargo edit.
+  assert.equal(StateStore.undo(), true, 'the card move is undone first');
+  assert.equal(PackLibrary.getAnnotations('A')[1].offset, null, 'the card is back where it was');
+  assert.equal(stored('A').lastEdited, afterSecond, 'with the time the Pack had before the move');
+  assert.equal(StateStore.undo(), true, 'then the second callout');
+  assert.equal(PackLibrary.getAnnotations('A').length, 1);
+  assert.equal(stored('A').lastEdited, afterFirst, 'with the time the Pack had before the second callout');
+  assert.equal(StateStore.undo(), true, 'then the cargo edit');
   assert.equal(stored('A').notes, undefined);
-  assert.equal(PackLibrary.getAnnotations('A').length, 2, 'Undo neither erases nor resurrects annotations');
-  assert.deepEqual(PackLibrary.getAnnotations('A')[1].offset, { dx: 20, dy: 20 }, 'including the latest card position');
-  assert.ok(stored('A').lastEdited >= editedAt, 'Undo must not move lastEdited back past the annotation edit');
+  assert.equal(PackLibrary.getAnnotations('A').length, 1, 'the earlier callout is kept');
+  assert.equal(stored('A').lastEdited, afterFirst, 'the cargo edit never touched lastEdited');
+  assert.equal(StateStore.redo(), true);
+  assert.equal(StateStore.redo(), true);
+  assert.equal(stored('A').lastEdited, afterSecond);
   assert.equal(StateStore.redo(), true);
   assert.equal(stored('A').notes, 'cargo edit');
   assert.equal(PackLibrary.getAnnotations('A').length, 2);
-  assert.ok(stored('A').lastEdited >= editedAt);
+  assert.deepEqual(PackLibrary.getAnnotations('A')[1].offset, { dx: 20, dy: 20 }, 'the latest card position is restored');
+  assert.equal(stored('A').lastEdited, afterMove, 'Redo restores the time of the move');
 });
 
 test('measurements and annotations are independent collections: neither edit touches the other', () => {
@@ -216,7 +245,7 @@ test('deleting a callout can be put back once, with the same ID and position, an
   assert.equal(PackLibrary.restoreAnnotation('A', { id: 'x', type: 'callout' }, 0).reason, 'invalid');
   assert.equal(PackLibrary.restoreAnnotation('A', callout('tail'), 99).ok, true, 'an out-of-range position appends');
   assert.equal(PackLibrary.getAnnotations('A').at(-1).id, 'tail');
-  assert.equal(StateStore.undo(), false, 'putting it back was not a cargo step either');
+  oneStepRoundTrip('putting it back');
 });
 
 // ============================================================================
@@ -510,7 +539,10 @@ test('the generic Pack update cannot write annotations: invalid, over-cap or any
     assert.equal(stored('A').lastEdited, edited);
     assert.equal(JSON.stringify(StateStore.snapshot().packLibrary), stateBefore);
     assert.deepEqual(notifications, [], 'no notification');
-    assert.equal(StateStore.undo(), false, 'and no history step');
+    assert.equal(StateStore.undo(), true, 'the only step is the Keep callout creation');
+    assert.equal(PackLibrary.getAnnotations('A').length, 0, 'the refused writes added no step above it');
+    assert.equal(StateStore.redo(), true);
+    assert.equal(PackLibrary.getAnnotations('A').length, 1);
     // Legacy updates and whole-Pack patches that merely repeat the stored annotations still work.
     assert.ok(PackLibrary.update('A', { title: 'Renamed' }), 'an ordinary update');
     assert.equal(stored('A').title, 'Renamed');
@@ -585,7 +617,7 @@ const setLastEdited = (packId, value) => StateStore.set({
   packLibrary: StateStore.get('packLibrary').map(p => (p.id === packId ? { ...p, lastEdited: value } : p)),
 }, { skipHistory: true });
 
-test('arrow writers are annotation-only edits: lastEdited moves, cargo Undo does not, cargo and callouts stay untouched', () => {
+test('arrow writers are undoable steps: lastEdited moves, and each step reverts exactly once, cargo and callouts stay untouched', () => {
   seed();
   const [a, b] = twoCrates('A');
   const callout1 = PackLibrary.addCallout('A', note('Beside', ground(3, 3))).annotation;
@@ -601,7 +633,7 @@ test('arrow writers are annotation-only edits: lastEdited moves, cargo Undo does
     assert.deepEqual([added.annotation.type, added.annotation.color, added.annotation.width, added.annotation.hidden], ['arrow', '#ffa500', 'bold', false]);
     assert.equal(notifications.at(-1), 'pack-annotations', 'the derived notification: only the overlay and list refresh');
     assert.ok(stored('A').lastEdited > 123, 'creating an arrow updates lastEdited');
-    assert.equal(StateStore.undo(), false, 'and adds no cargo Undo step');
+    oneStepRoundTrip('the write');
     assert.equal(stored('B').annotations, undefined, 'another Load Plan is untouched');
     const id = added.annotation.id;
 
@@ -639,7 +671,7 @@ test('arrow writers are annotation-only edits: lastEdited moves, cargo Undo does
     assert.deepEqual(PackLibrary.getAnnotations('A').map(r => r.id), [callout1.id, id]);
     assert.equal(JSON.stringify(PackLibrary.getAnnotations('A')[0]), calloutBefore, 'the callout is byte-identical');
     assert.equal(JSON.stringify(stored('A').cases), cargoBefore, 'cargo is untouched');
-    assert.equal(StateStore.undo(), false, 'no arrow edit added a cargo Undo step');
+    oneStepRoundTrip('the last arrow edit');
   } finally { unsubscribe(); }
 });
 
@@ -708,22 +740,36 @@ test('arrows share the per-plan maximum of 200 with callouts and recovery record
   assert.equal(PackLibrary.getAnnotations('B').length, 1);
 });
 
-test('cargo Undo/Redo keeps arrows and never rolls lastEdited back past an arrow edit', () => {
+test('cargo and arrow edits undo and redo in order, each restoring its exact lastEdited', t => {
+  tickingClock(t);
   seed();
   PackLibrary.addArrow('A', { start: ground(0, 60), end: ground(40, 60) });
+  const afterFirst = stored('A').lastEdited;
   StateStore.set({ packLibrary: StateStore.get('packLibrary').map(p => (p.id === 'A' ? { ...p, notes: 'cargo edit' } : p)) });
   const second = PackLibrary.addArrow('A', { start: ground(5, 5), end: floorAnchor(50) });
+  const afterSecond = stored('A').lastEdited;
   PackLibrary.updateArrow('A', second.annotation.id, { width: 'bold', hidden: true });
-  const editedAt = stored('A').lastEdited;
-  assert.equal(StateStore.undo(), true, 'the cargo edit is undone');
+  const afterLook = stored('A').lastEdited;
+  assert.ok(123 < afterFirst && afterFirst < afterSecond && afterSecond < afterLook, 'each arrow edit has its own, later time');
+  // Newest first: the arrow's look, then the second arrow, then the cargo edit.
+  assert.equal(StateStore.undo(), true, 'the look edit is undone first');
+  assert.notEqual(PackLibrary.getAnnotations('A')[1].width, 'bold');
+  assert.equal(stored('A').lastEdited, afterSecond, 'with the time the Pack had before the look edit');
+  assert.equal(StateStore.undo(), true, 'then the second arrow');
+  assert.equal(PackLibrary.getAnnotations('A').length, 1);
+  assert.equal(stored('A').lastEdited, afterFirst, 'with the time the Pack had before the second arrow');
+  assert.equal(StateStore.undo(), true, 'then the cargo edit');
   assert.equal(stored('A').notes, undefined);
-  assert.equal(PackLibrary.getAnnotations('A').length, 2, 'Undo neither erases nor resurrects arrows');
-  assert.deepEqual([PackLibrary.getAnnotations('A')[1].width, PackLibrary.getAnnotations('A')[1].hidden], ['bold', true], 'including the latest edit');
-  assert.ok(stored('A').lastEdited >= editedAt);
+  assert.equal(PackLibrary.getAnnotations('A').length, 1, 'the earlier arrow is kept');
+  assert.equal(stored('A').lastEdited, afterFirst, 'the cargo edit never touched lastEdited');
+  assert.equal(StateStore.redo(), true);
+  assert.equal(StateStore.redo(), true);
+  assert.equal(stored('A').lastEdited, afterSecond);
   assert.equal(StateStore.redo(), true);
   assert.equal(stored('A').notes, 'cargo edit');
   assert.equal(PackLibrary.getAnnotations('A').length, 2);
-  assert.ok(stored('A').lastEdited >= editedAt);
+  assert.deepEqual([PackLibrary.getAnnotations('A')[1].width, PackLibrary.getAnnotations('A')[1].hidden], ['bold', true], 'the latest edit is restored');
+  assert.equal(stored('A').lastEdited, afterLook, 'Redo restores the time of the look edit');
 });
 
 test('each arrow end follows its own cargo: moving, deleting or resizing one flags the arrow, never edits or relocates it', () => {
@@ -968,7 +1014,7 @@ const zigzagSamples = vertices => Array.from({ length: (vertices - 1) * 2 }, (_,
 const DRUM = { ...CASE, shape: 'cylinder', dimensions: { length: 60, width: 24, height: 24 } };
 const placeCrate = (packId = 'A', x = 60) => PackLibrary.addInstance(packId, CASE.id, { x, y: 16, z: 0 });
 
-test('freehand writers are annotation-only edits: lastEdited moves, cargo Undo does not, and a style edit never moves a stroke', () => {
+test('freehand writers are undoable steps: lastEdited moves, and each step reverts exactly once, and a style edit never moves a stroke', () => {
   seed();
   const crate = placeCrate();
   const callout1 = PackLibrary.addCallout('A', note('Beside', ground(3, 3))).annotation;
@@ -984,7 +1030,7 @@ test('freehand writers are annotation-only edits: lastEdited moves, cargo Undo d
     assert.equal(added.tolerance, 0.1);
     assert.equal(notifications.at(-1), 'pack-annotations', 'derived notification: the app refreshes only the overlay and list');
     assert.ok(stored('A').lastEdited > 123, 'creating a stroke updates lastEdited');
-    assert.equal(StateStore.undo(), false, 'and adds no cargo Undo step');
+    oneStepRoundTrip('the write');
     assert.equal(stored('B').annotations, undefined, 'another Load Plan is untouched');
     assert.equal(JSON.stringify(stored('A').cases), cargoBefore, 'cargo is untouched');
     assert.equal(JSON.stringify(PackLibrary.getAnnotations('A')[0]), calloutBefore, 'so is the callout');
@@ -1015,7 +1061,7 @@ test('freehand writers are annotation-only edits: lastEdited moves, cargo Undo d
     assert.equal(PackLibrary.updateCallout('A', record.id, { title: 'x' }).reason, 'not-found', 'and a stroke is not a callout');
     assert.equal(PackLibrary.updateDraw('A', 'nope', { hidden: true }).reason, 'not-found');
     assert.equal(PackLibrary.updateDraw('missing', record.id, { hidden: true }).reason, 'pack-not-found');
-    assert.equal(StateStore.undo(), false, 'no edit added a cargo Undo step');
+    oneStepRoundTrip('the last edit');
 
     // A stroke that needs review can still be restyled or hidden: no layout is consulted.
     StateStore.set({ caseLibrary: [{ ...CASE, dimensions: { ...CASE.dimensions, height: 40 } }] }, { skipHistory: true });
@@ -1103,24 +1149,37 @@ test('strokes share the 200-record cap, are limited to 256 vertices each and 3,0
   assert.equal(PackLibrary.restoreAnnotation('P', removed.removed, removed.index).ok, true, 'room again');
 });
 
-test('cargo Undo/Redo keeps strokes and never rolls lastEdited back past a stroke edit; delete can be put back once', () => {
+test('cargo and stroke edits undo and redo in order, each restoring its exact lastEdited; delete can be put back once', t => {
+  tickingClock(t);
   seed();
   const crate = placeCrate();
   PackLibrary.addDraw('A', crateGesture(crate.id));
+  const afterFirst = stored('A').lastEdited;
   StateStore.set({ packLibrary: StateStore.get('packLibrary').map(p => (p.id === 'A' ? { ...p, notes: 'cargo edit' } : p)) });
   const second = PackLibrary.addDraw('A', floorGesture({ color: 'blue' }));
   assert.equal(second.ok, true);
+  const afterSecond = stored('A').lastEdited;
   PackLibrary.updateDraw('A', second.annotation.id, { width: 'bold' });
-  const editedAt = stored('A').lastEdited;
+  const afterStyle = stored('A').lastEdited;
+  assert.ok(123 < afterFirst && afterFirst < afterSecond && afterSecond < afterStyle, 'each stroke edit has its own, later time');
   const strokes = JSON.stringify(PackLibrary.getAnnotations('A'));
-  assert.equal(StateStore.undo(), true, 'the cargo edit is undone');
+  // Newest first: the stroke's style, then the second stroke, then the cargo edit.
+  assert.equal(StateStore.undo(), true, 'the style edit is undone first');
+  assert.equal(stored('A').lastEdited, afterSecond, 'with the time the Pack had before the style edit');
+  assert.equal(StateStore.undo(), true, 'then the second stroke');
+  assert.equal(PackLibrary.getAnnotations('A').length, 1);
+  assert.equal(stored('A').lastEdited, afterFirst, 'with the time the Pack had before the second stroke');
+  assert.equal(StateStore.undo(), true, 'then the cargo edit');
   assert.equal(stored('A').notes, undefined);
-  assert.equal(JSON.stringify(PackLibrary.getAnnotations('A')), strokes, 'Undo neither erases nor resurrects strokes, nor changes their style');
-  assert.ok(stored('A').lastEdited >= editedAt, 'and does not move lastEdited back past the stroke edit');
+  assert.equal(PackLibrary.getAnnotations('A').length, 1, 'the earlier stroke is kept');
+  assert.equal(stored('A').lastEdited, afterFirst, 'the cargo edit never touched lastEdited');
   assert.equal(StateStore.redo(), true);
-  assert.equal(JSON.stringify(PackLibrary.getAnnotations('A')), strokes);
-  assert.ok(stored('A').lastEdited >= editedAt);
-  assert.equal(StateStore.undo(), true);
+  assert.equal(StateStore.redo(), true);
+  assert.equal(stored('A').lastEdited, afterSecond);
+  assert.equal(StateStore.redo(), true);
+  assert.equal(stored('A').notes, 'cargo edit');
+  assert.equal(JSON.stringify(PackLibrary.getAnnotations('A')), strokes, 'the strokes and their style are restored exactly');
+  assert.equal(stored('A').lastEdited, afterStyle, 'Redo restores the time of the style edit');
   // Deleting is deliberate and individual; putting it back keeps the ID, the position and every vertex.
   const removed = PackLibrary.deleteAnnotation('A', second.annotation.id);
   assert.deepEqual(PackLibrary.getAnnotations('A').map(r => r.type), ['draw']);
@@ -1481,7 +1540,7 @@ test('line style: the writers store Dashed and Dotted only, an unchanged choice 
     assert.equal(PackLibrary.addArrow('A', { start: ground(0, 90), end: ground(40, 90), style: 'wavy' }).reason, 'invalid');
     assert.equal(PackLibrary.addDraw('A', crateGesture(crate.id, { style: 'Dashed' })).reason, 'invalid');
     assert.equal(PackLibrary.getAnnotations('A').length, 5, 'a refused style writes nothing');
-    assert.equal(StateStore.undo(), false, 'and none of these adds a cargo Undo step');
+    oneStepRoundTrip('the last of these edits');
 
     // A saved record changes with exactly one annotation write; the same choice again writes nothing.
     notifications.length = 0;
@@ -1505,7 +1564,7 @@ test('line style: the writers store Dashed and Dotted only, an unchanged choice 
     assert.equal(PackLibrary.updateArrow('A', legacyArrow.id, { style: 'wavy' }).reason, 'invalid');
     assert.equal(PackLibrary.updateDraw('A', dottedStroke.id, { style: null }).reason, 'invalid');
     assert.equal(find(legacyArrow.id).style, 'dotted', 'a refused edit changes nothing');
-    assert.equal(StateStore.undo(), false, 'style edits stay outside cargo Undo');
+    oneStepRoundTrip('the style edit');
   } finally {
     unsubscribe();
   }
@@ -1535,7 +1594,7 @@ test('line style: the writers store Dashed and Dotted only, an unchanged choice 
   assert.deepEqual(statuses('L'), ['valid']);
 });
 
-test('drawing move: moveDraw is one annotation-only write, a refused move writes nothing, and the new position survives every export and restore', () => {
+test('drawing move: moveDraw is one undoable write, a refused move writes nothing, and the new position survives every export and restore', () => {
   seed();
   const crate = placeCrate();
   const top = PackLibrary.addDraw('A', crateGesture(crate.id, { color: 'blue', width: 'bold', style: 'dashed' })).annotation;
@@ -1562,7 +1621,7 @@ test('drawing move: moveDraw is one annotation-only write, a refused move writes
     assert.equal(JSON.stringify(stored('A').cases), cargoBefore, 'cargo is never touched');
     assert.equal(JSON.stringify(PackLibrary.getAnnotations('A').filter(r => r.id !== top.id)), JSON.stringify(JSON.parse(before).filter(r => r.id !== top.id)), 'no other annotation changed');
     assert.ok(stored('A').lastEdited > 123, 'a real move updates lastEdited');
-    assert.equal(StateStore.undo(), false, 'and adds no cargo Undo step');
+    oneStepRoundTrip('the write');
     assert.deepEqual(statuses('A'), ['valid', 'valid', 'valid'], 'the moved stroke still resolves');
 
     // The same position again, or an offset below the grid, is not an edit.
@@ -1617,4 +1676,89 @@ test('drawing move: moveDraw is one annotation-only write, a refused move writes
   const restore = ImportExport.planWorkspaceRestore(ImportExport.parseWorkspaceImportJSON(workspaceJson), { currentState: StateStore.snapshot() });
   assert.deepEqual(restore.packLibrary.find(pack => pack.id === 'A').annotations, expected, 'a restore brings the moved stroke back where it was put');
   assert.doesNotThrow(() => ImportExport.assertRestorableWorkspaceBackup(workspaceJson));
+});
+
+test('an unchanged measurement endpoint writes nothing: no history step and lastEdited stays put', () => {
+  seed();
+  const measured = PackLibrary.addMeasurement('A', { start: ground(0, 60), end: ground(40, 60) });
+  assert.equal(measured.ok, true);
+  const edited = stored('A').lastEdited;
+  const same = PackLibrary.moveMeasurementEndpoint('A', measured.measurement.id, 'start', measured.measurement.start);
+  assert.deepEqual([same.ok, same.unchanged], [true, true], 'the same content at the same place is no edit');
+  assert.equal(stored('A').lastEdited, edited);
+  assert.equal(StateStore.undo(), true, 'the only step is the measurement creation');
+  assert.equal(PackLibrary.getMeasurements('A').length, 0, 'and it was not followed by an empty step');
+  assert.equal(StateStore.redo(), true);
+  assert.equal(PackLibrary.getMeasurements('A').length, 1);
+});
+
+test('Undo and Redo keep the current view and thumbnail, and history never crosses a Load Plan switch', () => {
+  seed();
+  PackLibrary.updatePreview('A', { thumbnail: 'data:current', thumbnailRenderVersion: 2 });
+  PackLibrary.updateEditorView('A', { cameraPosition: { x: 30, y: 18, z: 20 }, target: { x: 14, y: 2, z: 0 } });
+  const view = stored('A').editorView;
+  const added = PackLibrary.addCallout('A', note('Written after the preview'));
+  assert.equal(added.ok, true);
+  assert.equal(StateStore.undo(), true);
+  assert.equal(PackLibrary.getAnnotations('A').length, 0);
+  assert.equal(stored('A').thumbnail, 'data:current', 'Undo keeps the current thumbnail');
+  assert.deepEqual(stored('A').editorView, view, 'and the current view');
+  assert.equal(StateStore.redo(), true);
+  assert.equal(PackLibrary.getAnnotations('A').length, 1);
+
+  // A -> B -> A: switching Load Plans starts a fresh history, so nothing from A can be replayed through B.
+  PackLibrary.open('B');
+  assert.equal(StateStore.undo(), false, 'Load Plan B starts with no history to replay');
+  PackLibrary.open('A');
+  assert.equal(StateStore.undo(), false, 'and returning to A does not revive the earlier steps');
+  assert.equal(PackLibrary.getAnnotations('A').length, 1, 'A keeps its saved content');
+});
+
+test('whole-object move: an Arrow or Measurement is carried rigidly along ONE surface as one undoable write, and anything else is refused', () => {
+  seed([makePack('A', { cases: [solidInstance('i1'), { ...solidInstance('i2'), transform: { ...solidInstance('i2').transform, position: { x: 120, y: 16, z: 0 } } }] })]);
+  const top = (id, x, z) => onCargo(id, { x, y: 16, z });
+  const arrow = PackLibrary.addArrow('A', { start: ground(0, 60), end: ground(40, 60), color: 'ink', width: 'bold', style: 'dashed' });
+  const meas = PackLibrary.addMeasurement('A', { start: top('i1', -12, -6), end: top('i1', 12, 6), label: 'Top run' });
+  assert.deepEqual([arrow.ok, meas.ok], [true, true]);
+  const shape = record => JSON.stringify({ ...record, start: null, end: null, updatedAt: 0 });
+  const reach = (start, end) => Math.hypot(...['x', 'y', 'z'].map(axis => (end.position || end.local)[axis] - (start.position || start.local)[axis]));
+
+  // A ground Arrow: both ends shift by the same snapped offset, everything else (including length) is kept.
+  const arrowMoved = PackLibrary.moveArrow('A', arrow.annotation.id, 5.004, -3);
+  assert.equal(arrowMoved.ok, true);
+  const arrowNow = PackLibrary.getAnnotations('A').find(record => record.id === arrow.annotation.id);
+  assert.deepEqual([arrowNow.start.position, arrowNow.end.position], [{ x: 5, y: 0, z: 57 }, { x: 45, y: 0, z: 57 }]);
+  assert.equal(shape(arrowNow), shape(arrow.annotation), 'name, color, width, style and identity are untouched');
+  assert.equal(reach(arrowNow.start, arrowNow.end), reach(arrow.annotation.start, arrow.annotation.end));
+  assert.equal(StateStore.undo(), true);
+  assert.deepEqual(PackLibrary.getAnnotations('A').find(record => record.id === arrow.annotation.id).start, arrow.annotation.start, 'one Undo step restores it');
+  assert.equal(StateStore.redo(), true);
+
+  // A Measurement on one cargo face: both ends move inside that face, the label and the surface stay.
+  const measMoved = PackLibrary.moveMeasurement('A', meas.measurement.id, 2, 1);
+  assert.equal(measMoved.ok, true);
+  const measNow = PackLibrary.getMeasurements('A').find(record => record.id === meas.measurement.id);
+  assert.deepEqual([measNow.start.local, measNow.end.local], [{ x: -10, y: 16, z: -5 }, { x: 14, y: 16, z: 7 }]);
+  assert.deepEqual([measNow.label, measNow.start.instanceId], ['Top run', 'i1']);
+
+  // A refused move writes nothing and keeps Redo: off the face, an unchanged offset, a pair that does not share one surface.
+  const before = snapshotOf();
+  const refusals = [
+    PackLibrary.moveMeasurement('A', meas.measurement.id, 40, 0), // leaves the cargo face
+    PackLibrary.moveMeasurement('A', meas.measurement.id, Number.NaN, 0),
+    PackLibrary.moveArrow('A', arrow.annotation.id, Number.POSITIVE_INFINITY, 0),
+  ];
+  assert.deepEqual(refusals.map(outcome => outcome.ok), [false, false, false]);
+  assert.equal(snapshotOf(), before, 'a refused move writes nothing');
+  assert.equal(PackLibrary.moveArrow('A', arrow.annotation.id, 0.004, 0).unchanged, true, 'an offset that snaps to zero is no edit');
+  assert.equal(PackLibrary.checkMeasurementMove('A', meas.measurement.id, 1, 0).dryRun, true);
+  assert.equal(snapshotOf(), before, 'and a dry-run verdict writes nothing');
+
+  const mixed = PackLibrary.addMeasurement('A', { start: top('i1', 0, 0), end: ground(100, 40) });
+  assert.equal(mixed.ok, true);
+  assert.equal(PackLibrary.moveMeasurement('A', mixed.measurement.id, 1, 1).reason, 'invalid', 'cargo and ground are not one surface');
+  const otherCargo = PackLibrary.addMeasurement('A', { start: top('i1', 0, 0), end: top('i2', 0, 0) });
+  assert.equal(PackLibrary.moveMeasurement('A', otherCargo.measurement.id, 1, 1).reason, 'invalid', 'two cargo items are not one surface');
+  const edge = PackLibrary.addArrow('A', { start: onCargo('i1', { x: -10, y: 16, z: 12 }), end: onCargo('i1', { x: 10, y: 16, z: 12 }) });
+  assert.equal(PackLibrary.moveArrow('A', edge.annotation.id, 0, 1).reason, 'invalid', 'two points on a shared edge could be on either face, so the move is ambiguous');
 });

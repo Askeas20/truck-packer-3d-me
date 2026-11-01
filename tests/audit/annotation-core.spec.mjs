@@ -2044,3 +2044,37 @@ test('drawing move: quantization corner cases — rigid for any offset, and a ti
   const moved = A.translateDrawRecord(precise, 0.07, 0.03, 5000);
   assert.deepEqual(moved.anchor.local, { x: -14.1837, y: 15, z: -6.4823 }, 'anchor offsets add exactly at 4 decimals');
 });
+
+test('arrows and drawings take an optional name: a legacy record keeps its exact stored form, a name round-trips, a blank name clears it and an invalid stored name is unreadable', () => {
+  const legacyArrow = arrow('a-legacy');
+  assert.equal(Object.hasOwn(legacyArrow, 'name'), false, 'a record that was never named has no name key');
+  const named = A.editArrowRecord(legacyArrow, { name: '  Left   pallet ' }, 5000);
+  assert.equal(named.name, 'Left pallet', 'a custom name is one normalized line');
+  assert.equal(named.id, legacyArrow.id);
+  assert.equal(named.createdAt, legacyArrow.createdAt);
+  assert.deepEqual(named.start, legacyArrow.start, 'renaming never changes the anchors');
+  assert.deepEqual(named.end, legacyArrow.end);
+  assert.equal(named.hidden, legacyArrow.hidden);
+  assert.equal(named.width, legacyArrow.width);
+  assert.equal(named.color, legacyArrow.color);
+  assert.deepEqual(A.normalizeAnnotations(JSON.parse(JSON.stringify([named]))), [named], 'the name survives save and reload');
+  assert.equal(A.editArrowRecord(named, { name: '   ' }, 6000).name, undefined, 'a blank name removes the custom name');
+  assert.equal(A.editArrowRecord(named, { name: '' }, 6000).name, undefined);
+  assert.equal(A.editArrowRecord(legacyArrow, { name: 'x'.repeat(A.MAX_ANNOTATION_NAME_LENGTH + 5) }, 5000).name.length, A.MAX_ANNOTATION_NAME_LENGTH);
+  assert.equal(A.validateArrowRecord({ ...legacyArrow, name: '' }), 'name is invalid', 'a stored blank name is not a silent legacy record');
+  assert.equal(A.validateArrowRecord({ ...legacyArrow, name: 7 }), 'name is invalid');
+  assert.equal(A.validateArrowRecord({ ...legacyArrow, name: 'x'.repeat(A.MAX_ANNOTATION_NAME_LENGTH + 1) }), 'name is invalid');
+  assert.equal(A.validateArrowRecord({ ...legacyArrow, label: 'Left' }), 'record has an unsupported field', 'only the name key is new');
+
+  const legacyDraw = FLOOR_STROKE();
+  assert.equal(Object.hasOwn(legacyDraw, 'name'), false);
+  const namedDraw = A.editDrawRecord(legacyDraw, { name: 'Floor mark' }, 5000);
+  assert.equal(namedDraw.name, 'Floor mark');
+  assert.deepEqual(namedDraw.points, legacyDraw.points, 'renaming a drawing keeps its geometry');
+  assert.deepEqual(namedDraw.anchor, legacyDraw.anchor);
+  assert.equal(namedDraw.createdAt, legacyDraw.createdAt);
+  assert.deepEqual(A.normalizeAnnotations(JSON.parse(JSON.stringify([namedDraw]))), [namedDraw]);
+  assert.equal(A.validateDrawRecord({ ...legacyDraw, name: '' }), 'name is invalid');
+  assert.equal(A.validateDrawRecord({ ...legacyDraw, title: 'Floor' }), 'record has an unsupported field');
+  assert.equal(A.editDrawRecord(legacyDraw, { name: '   ' }, 5000).name, undefined);
+});

@@ -7,7 +7,7 @@
  *   An annotation is informational authored content ("this is what the crew should know here"). It never
  *   influences cargo, collision, handling rules, assessment, Space Utilization, AutoPack or the existing
  *   PDF. Annotations belong to exactly one Load Plan, are stored separately from cargo and measurements,
- *   and live outside cargo Undo/Redo (see core/state-store.js).
+ *   and each completed edit is one step of the same Undo/Redo history as cargo (see core/state-store.js).
  *
  *   V1A stores one record type, `callout`: a titled note attached to a point on a supported surface.
  *   The point is a Measurement anchor (core/measurements.js) so the cargo identity policy, truck shell
@@ -52,6 +52,7 @@ import {
   patchContains,
   resolveAnchor,
   resolveDrawVertices,
+  translateAnchorPair,
   validateAnchorRecord,
   validateDrawSurface,
 } from './measurements.js';
@@ -70,6 +71,8 @@ export const ANNOTATION_TYPE_DRAW = 'draw';
 export const ANNOTATION_TYPE_UNREADABLE = 'unreadable';
 export const MAX_CALLOUT_TITLE_LENGTH = 48;
 export const MAX_CALLOUT_DESCRIPTION_LENGTH = 140;
+/** Optional custom name of an arrow or a drawing. Absent means the generated name ("Arrow 1", "Drawing 1") is shown. */
+export const MAX_ANNOTATION_NAME_LENGTH = 40;
 /** Largest card offset from its marker, in CSS pixels, in either axis. */
 export const MAX_CARD_OFFSET_PX = 2000;
 export const ANNOTATION_COLORS = Object.freeze(['ink', 'blue', 'green', 'red', 'violet']);
@@ -109,9 +112,9 @@ const MAX_ID_LENGTH = 64;
 /** Record types a later release writes. An older build keeps them untouched and says why. None is reserved now. */
 const FUTURE_TYPES = new Set();
 /** The only top-level keys an arrow may carry; any other key makes the record unreadable, never dropped. */
-const ARROW_KEYS = new Set(['id', 'type', 'schemaVersion', 'color', 'width', 'style', 'hidden', 'start', 'end', 'createdAt', 'updatedAt']);
+const ARROW_KEYS = new Set(['id', 'type', 'schemaVersion', 'name', 'color', 'width', 'style', 'hidden', 'start', 'end', 'createdAt', 'updatedAt']);
 /** The only top-level keys a stroke may carry (`face` for cargo only); any other key makes it unreadable, never dropped. */
-const DRAW_KEYS = new Set(['id', 'type', 'schemaVersion', 'color', 'width', 'style', 'hidden', 'anchor', 'face', 'points', 'createdAt', 'updatedAt']);
+const DRAW_KEYS = new Set(['id', 'type', 'schemaVersion', 'name', 'color', 'width', 'style', 'hidden', 'anchor', 'face', 'points', 'createdAt', 'updatedAt']);
 
 /**
  * Optional starting texts for the callout editor. Picking one only fills the title and description,
@@ -158,6 +161,24 @@ function collapseText(value) {
 
 export function normalizeCalloutTitle(value) {
   return collapseText(value).slice(0, MAX_CALLOUT_TITLE_LENGTH).trim();
+}
+
+/** A custom arrow or drawing name in its stored form, or null when there is none (blank input clears the name). */
+export function normalizeAnnotationName(value) {
+  if (typeof value !== 'string') return null;
+  return collapseText(value).slice(0, MAX_ANNOTATION_NAME_LENGTH).trim() || null;
+}
+
+/** Stored names follow the callout title rule: non-blank and within the limit. Canonical form then trims and collapses spaces. */
+function isValidAnnotationName(value) {
+  return typeof value === 'string' && value.trim() !== '' && value.length <= MAX_ANNOTATION_NAME_LENGTH;
+}
+
+/** Sets or clears the optional name on a copy of an arrow or drawing: a blank name removes the key. */
+function withAnnotationName(record, name) {
+  const normalized = normalizeAnnotationName(name);
+  if (normalized) record.name = normalized;
+  else delete record.name;
 }
 
 /** @returns {string | null} null when empty */
@@ -317,7 +338,7 @@ export function createArrowRecord({ id, start, end, color = DEFAULT_ANNOTATION_C
  * Pure edit of an arrow's presentation. Unknown patch keys are ignored; the endpoints, identity and creation
  * time are preserved. Null when the result would not be a valid arrow (for example an unknown width or style).
  * @param {Record<string, any>} record
- * @param {{ color?: string, width?: string, style?: string, hidden?: boolean }} patch
+ * @param {{ name?: string | null, color?: string, width?: string, style?: string, hidden?: boolean }} patch
  * @param {number} now
  */
 export function editArrowRecord(record, patch, now) {
@@ -328,6 +349,7 @@ export function editArrowRecord(record, patch, now) {
   if (Object.hasOwn(patch, 'width')) next.width = patch.width;
   if (Object.hasOwn(patch, 'style')) next.style = patch.style;
   if (Object.hasOwn(patch, 'hidden')) next.hidden = patch.hidden === true;
+  if (Object.hasOwn(patch, 'name')) withAnnotationName(next, patch.name);
   return validateArrowRecord(next) ? null : canonicalArrowRecord(next);
 }
 
@@ -344,6 +366,26 @@ export function replaceArrowEndpoint(record, which, anchor, now) {
   if (which !== 'start' && which !== 'end') return null;
   if (!isRecord(record) || record.type !== ANNOTATION_TYPE_ARROW || !isFiniteNumber(now)) return null;
   const next = { ...record, [which]: anchor, updatedAt: now };
+  return validateArrowRecord(next) ? null : canonicalArrowRecord(next);
+}
+
+/**
+ * Pure rigid move of a whole arrow: both endpoints by the same in-plane offset `(du, dv)` (inches, snapped to the
+ * 0.01 grid), so its length, direction, name, color, width, style, hidden flag, identity and creation time are
+ * preserved. Only when both endpoints sit on ONE physical surface (see translateAnchorPair); otherwise null and the
+ * endpoints stay individually movable. An offset that snaps to zero returns the arrow unchanged (same `updatedAt`),
+ * anything else gets `updatedAt = now`. Whether the moved ends still resolve on the current layout is judged at write time.
+ * @param {Record<string, any>} record
+ * @param {number} du
+ * @param {number} dv
+ * @param {number} now
+ */
+export function translateArrowRecord(record, du, dv, now) {
+  if (!isRecord(record) || record.type !== ANNOTATION_TYPE_ARROW || !isFiniteNumber(now) || validateArrowRecord(record)) return null;
+  const moved = translateAnchorPair(record.start, record.end, du, dv);
+  if (!moved) return null;
+  if (moved.du === 0 && moved.dv === 0) return canonicalArrowRecord(record);
+  const next = { ...record, start: moved.start, end: moved.end, updatedAt: now };
   return validateArrowRecord(next) ? null : canonicalArrowRecord(next);
 }
 
@@ -390,7 +432,7 @@ export function createDrawRecord({ id, anchor, face, points, color = DEFAULT_ANN
  * and creation time are carried over exactly as stored, so a style change can never move a stroke or change
  * what it is attached to. Null when the result would not be a valid stroke (for example an unknown width or style).
  * @param {Record<string, any>} record
- * @param {{ color?: string, width?: string, style?: string, hidden?: boolean }} patch
+ * @param {{ name?: string | null, color?: string, width?: string, style?: string, hidden?: boolean }} patch
  * @param {number} now
  */
 export function editDrawRecord(record, patch, now) {
@@ -401,6 +443,7 @@ export function editDrawRecord(record, patch, now) {
   if (Object.hasOwn(patch, 'width')) next.width = patch.width;
   if (Object.hasOwn(patch, 'style')) next.style = patch.style;
   if (Object.hasOwn(patch, 'hidden')) next.hidden = patch.hidden === true;
+  if (Object.hasOwn(patch, 'name')) withAnnotationName(next, patch.name);
   return validateDrawRecord(next) ? null : canonicalDrawRecord(next);
 }
 
@@ -516,6 +559,7 @@ export function validateArrowRecord(record) {
   if (record.type !== ANNOTATION_TYPE_ARROW) return 'type is not supported';
   if (record.schemaVersion !== ANNOTATION_SCHEMA_VERSION) return 'schemaVersion is not supported';
   if (Object.keys(record).some(key => !ARROW_KEYS.has(key))) return 'record has an unsupported field';
+  if (Object.hasOwn(record, 'name') && !isValidAnnotationName(record.name)) return 'name is invalid';
   if (!isValidAnnotationColor(record.color)) return 'color is invalid';
   if (!ARROW_WIDTHS.includes(record.width)) return 'width is invalid';
   if (Object.hasOwn(record, 'style') && !LINE_STYLES.includes(record.style)) return 'style is invalid';
@@ -600,6 +644,7 @@ export function validateDrawRecord(record, { maxBytes = MAX_DRAW_RECORD_BYTES } 
   if (record.type !== ANNOTATION_TYPE_DRAW) return 'type is not supported';
   if (record.schemaVersion !== ANNOTATION_SCHEMA_VERSION) return 'schemaVersion is not supported';
   if (Object.keys(record).some(key => !DRAW_KEYS.has(key))) return 'record has an unsupported field';
+  if (Object.hasOwn(record, 'name') && !isValidAnnotationName(record.name)) return 'name is invalid';
   if (!isValidAnnotationColor(record.color)) return 'color is invalid';
   if (!DRAW_WIDTHS.includes(record.width)) return 'width is invalid';
   if (Object.hasOwn(record, 'style') && !LINE_STYLES.includes(record.style)) return 'style is invalid';
@@ -647,6 +692,9 @@ function canonicalArrowRecord(record) {
     color: canonicalAnnotationColor(record.color) || record.color,
     width: record.width,
   };
+  // A record that was never named keeps its exact stored form: the key is only written when there is a name.
+  const arrowName = normalizeAnnotationName(record.name);
+  if (arrowName) canonical.name = arrowName;
   // Solid is the absence of the key, so a record that was never styled keeps its exact stored form.
   if (record.style !== undefined && record.style !== DEFAULT_LINE_STYLE) canonical.style = record.style;
   canonical.hidden = record.hidden;
@@ -666,6 +714,8 @@ function canonicalDrawRecord(record) {
     color: canonicalAnnotationColor(record.color) || record.color,
     width: record.width,
   };
+  const drawName = normalizeAnnotationName(record.name);
+  if (drawName) canonical.name = drawName;
   if (record.style !== undefined && record.style !== DEFAULT_LINE_STYLE) canonical.style = record.style;
   canonical.hidden = record.hidden;
   canonical.anchor = canonicalAnchorRecord(record.anchor);

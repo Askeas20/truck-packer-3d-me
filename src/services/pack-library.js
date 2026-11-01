@@ -2594,9 +2594,9 @@ export function updateEditorView(packId, view) {
 // ============================================================================
 // SECTION: MEASUREMENTS (Measurement Tool V1)
 // ============================================================================
-// Measurements are authored Load Plan content, but they live outside cargo Undo/Redo: edits are
-// written with skipHistory, bump lastEdited, and are carried across Undo/Redo by the StateStore.
-// They never touch cargo, stats, thumbnails, AutoPack or any assessment.
+// Measurements are authored Load Plan content stored beside cargo. Each completed edit bumps lastEdited
+// and is one step of the same chronological Undo/Redo history as cargo edits, which restores the whole
+// recorded Pack, lastEdited included. They never touch cargo, stats, thumbnails, AutoPack or any assessment.
 
 /** Normalized, never-destructive measurement list (unreadable records are wrapped, not dropped). */
 export function getMeasurements(packOrId) {
@@ -2660,9 +2660,8 @@ export function resolveMeasurements(packOrId) {
 function commitMeasurements(previousPack, measurements) {
   const now = Date.now();
   const pack = { ...previousPack, measurements, lastEdited: now };
-  StateStore.markMeasurementEdit(previousPack.id, now);
+  // A completed measurement edit is one step of the shared Undo/Redo history.
   StateStore.set({ packLibrary: getPacks().map(p => (p === previousPack ? pack : p)) }, {
-    skipHistory: true,
     notification: { type: 'pack-measurements', previousPack, pack },
   });
   return pack;
@@ -2702,9 +2701,9 @@ export function renameMeasurement(packId, measurementId, label) {
 
 /**
  * Reposition one endpoint of a completed measurement onto a new anchor. A measurement-only edit:
- * it bumps lastEdited, stays out of cargo Undo/Redo, and never touches cargo. The new anchor is
- * validated and an invalid one writes nothing.
- * @returns {{ ok: true, pack: any } | { ok: false, reason: 'pack-not-found' | 'not-found' | 'invalid' }}
+ * it bumps lastEdited, is one Undo/Redo step (none when nothing changed), and never touches cargo.
+ * The new anchor is validated and an invalid one writes nothing.
+ * @returns {{ ok: true, pack: any, unchanged?: true } | { ok: false, reason: 'pack-not-found' | 'not-found' | 'invalid' }}
  */
 export function moveMeasurementEndpoint(packId, measurementId, which, anchor) {
   const previousPack = getById(packId);
@@ -2716,8 +2715,59 @@ export function moveMeasurementEndpoint(packId, measurementId, which, anchor) {
   }
   const moved = CoreMeasurements.replaceMeasurementEndpoint(current[index], which, anchor, Date.now());
   if (!moved) return { ok: false, reason: 'invalid' };
+  // The same content at the same place is no edit: no write, no history step, and the time of the last edit stays.
+  if (JSON.stringify({ ...moved, updatedAt: 0 }) === JSON.stringify({ ...current[index], updatedAt: 0 })) {
+    return { ok: true, pack: previousPack, unchanged: true };
+  }
   const next = current.map((record, i) => (i === index ? moved : record));
   return { ok: true, pack: commitMeasurements(previousPack, next) };
+}
+
+/**
+ * Move a whole completed measurement rigidly by one in-plane offset `(du, dv)` (inches, snapped to the 0.01 in grid).
+ * Both endpoints must share ONE physical surface (the same cargo face, or the same floor, ground, wall or ceiling
+ * plane of the same truck evidence), the moved endpoints must resolve Valid against the committed layout and stay
+ * on the one patch that held them, otherwise the whole move is refused (`invalid` when the pair is not rigidly
+ * movable, `unresolved` when the moved pair leaves its surface or stops resolving). Nothing is clamped, trimmed,
+ * detached or converted to another anchor kind; the label, identity and distance are preserved. Exactly one
+ * measurement-only write, or none; an offset that snaps to zero is `unchanged` and writes nothing. With `commit`
+ * false nothing is written and the verdict is returned as `dryRun`.
+ * @returns {{ ok: true, pack: any, measurement?: any, unchanged?: true, dryRun?: true } | { ok: false, reason: 'pack-not-found' | 'not-found' | 'invalid' | 'unresolved' }}
+ */
+export function moveMeasurement(packId, measurementId, du, dv, commit = true) {
+  const previousPack = getById(packId);
+  if (!previousPack) return { ok: false, reason: 'pack-not-found' };
+  const current = CoreMeasurements.normalizeMeasurements(previousPack.measurements);
+  const index = current.findIndex(record => record.id === measurementId);
+  if (index === -1 || current[index].type !== CoreMeasurements.MEASUREMENT_TYPE_POINT_TO_POINT) return { ok: false, reason: 'not-found' };
+  const before = current[index];
+  const moved = CoreMeasurements.translateMeasurementRecord(before, du, dv, Date.now());
+  if (!moved) return { ok: false, reason: 'invalid' };
+  if (JSON.stringify({ ...moved, updatedAt: 0 }) === JSON.stringify({ ...before, updatedAt: 0 })) return { ok: true, pack: previousPack, unchanged: true };
+  if (!rigidMovePlacesPair(before, moved, previousPack)) return { ok: false, reason: 'unresolved' };
+  if (!commit) return { ok: true, pack: previousPack, measurement: moved, dryRun: true };
+  return { ok: true, pack: commitMeasurements(previousPack, current.map((record, i) => (i === index ? moved : record))), measurement: moved };
+}
+
+/** The verdict moveMeasurement would give for this offset right now, without writing: what a drag previews. */
+export function checkMeasurementMove(packId, measurementId, du, dv) {
+  return moveMeasurement(packId, measurementId, du, dv, false);
+}
+
+/**
+ * Whether a rigidly moved record (a measurement or an arrow, both with `start` and `end`) still resolves Valid at
+ * both ends against the committed layout and stays on the one patch that held the pair before it moved.
+ */
+function rigidMovePlacesPair(before, moved, pack) {
+  const context = anchorResolutionContext(pack);
+  const frame = CoreMeasurements.rigidMoveFrame(before.start, before.end);
+  if (!frame.ok) return false;
+  const placed = [moved.start, moved.end].every(anchor => {
+    const resolution = CoreMeasurements.resolveAnchor(anchor, context);
+    return resolution.status === CoreMeasurements.MEASUREMENT_STATUS.VALID && resolution.point &&
+      [resolution.point.x, resolution.point.y, resolution.point.z].every(Number.isFinite);
+  });
+  return placed && CoreMeasurements.rigidMoveHeld(frame, before, moved, context);
 }
 
 /** Deliberate, individual deletion. Editing or deleting cargo never calls this. */
@@ -2733,9 +2783,9 @@ export function deleteMeasurement(packId, measurementId) {
 // SECTION: ANNOTATIONS (Annotations V1)
 // ============================================================================
 // Annotations are authored Load Plan content, stored separately from cargo and measurements. Like
-// measurements they live outside cargo Undo/Redo: edits are written with skipHistory, bump lastEdited,
-// and are carried across Undo/Redo by the StateStore. They never touch cargo, stats, thumbnails, AutoPack
-// or any assessment, and every write is validated by the same strict collection gate import uses.
+// measurements, each completed edit bumps lastEdited and is one step of the same chronological Undo/Redo
+// history as cargo edits. They never touch cargo, stats, thumbnails, AutoPack or any assessment, and every
+// write is validated by the same strict collection gate import uses.
 
 /** Normalized, never-destructive annotation list (unreadable records are wrapped, not dropped). */
 export function getAnnotations(packOrId) {
@@ -2753,9 +2803,8 @@ export function resolveAnnotations(packOrId) {
 function commitAnnotations(previousPack, annotations) {
   const now = Date.now();
   const pack = { ...previousPack, annotations, lastEdited: now };
-  StateStore.markAnnotationEdit(previousPack.id, now);
+  // A completed annotation edit is one step of the shared Undo/Redo history.
   StateStore.set({ packLibrary: getPacks().map(p => (p === previousPack ? pack : p)) }, {
-    skipHistory: true,
     notification: { type: 'pack-annotations', previousPack, pack },
   });
   return pack;
@@ -2865,6 +2914,29 @@ export function moveArrowEndpoint(packId, annotationId, which, anchor) {
   return editStoredAnnotation(packId, annotationId, CoreAnnotations.ANNOTATION_TYPE_ARROW,
     (record, now) => CoreAnnotations.replaceArrowEndpoint(record, which, anchor, now),
     (edited, pack) => CoreAnnotations.arrowPlacementProblem(edited, anchorResolutionContext(pack), which));
+}
+
+/**
+ * Move a whole arrow rigidly by one in-plane offset `(du, dv)` (inches, snapped to the 0.01 in grid): both ends move
+ * together and its length, direction, name, color, width, style and identity are preserved. Both ends must share ONE
+ * physical surface (see moveMeasurement); an arrow whose ends are on different surfaces is `invalid` for a whole move
+ * and stays movable one end at a time. The moved ends must resolve Valid and stay on the patch that held the pair,
+ * otherwise (`unresolved`) the whole move is refused, never clamped or re-attached. Exactly one annotation-only
+ * write, or none; an offset that snaps to zero is `unchanged`. With `commit` false nothing is written (`dryRun`).
+ */
+export function moveArrow(packId, annotationId, du, dv, commit = true) {
+  return editStoredAnnotation(packId, annotationId, CoreAnnotations.ANNOTATION_TYPE_ARROW,
+    (record, now) => CoreAnnotations.translateArrowRecord(record, du, dv, now),
+    (edited, pack) => {
+      const before = CoreAnnotations.normalizeAnnotations(pack.annotations).find(record => record.id === annotationId);
+      if (!before || !rigidMovePlacesPair(before, edited, pack)) return 'unresolved';
+      return CoreAnnotations.arrowPlacementProblem(edited, anchorResolutionContext(pack));
+    }, commit);
+}
+
+/** The verdict moveArrow would give for this offset right now, without writing: what a drag previews. */
+export function checkArrowMove(packId, annotationId, du, dv) {
+  return moveArrow(packId, annotationId, du, dv, false);
 }
 
 /**

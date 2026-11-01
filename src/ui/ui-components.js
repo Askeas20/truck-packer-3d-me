@@ -354,11 +354,14 @@ export function createUIComponents() {
     toast.appendChild(icon);
     toast.appendChild(body);
 
-    toast.addEventListener('click', () => removeToast(toast));
+    // An actionable toast keeps its action until it expires: an ordinary click on its body does not remove it.
+    if (!(Array.isArray(options.actions) && options.actions.length)) toast.addEventListener('click', () => removeToast(toast));
     toastContainer.appendChild(toast);
 
+    // Over the limit, plain toasts leave first, so an actionable toast (an Undo offer) is not evicted while it is still valid.
     while (toastContainer.children.length > 3) {
-      toastContainer.removeChild(toastContainer.firstChild);
+      const plain = [...toastContainer.children].find(el => !el.querySelector('.toast-actions'));
+      toastContainer.removeChild(plain || toastContainer.firstChild);
     }
 
     const duration = Number.isFinite(options.duration) ? options.duration : 3200;

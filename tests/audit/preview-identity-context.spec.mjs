@@ -3170,11 +3170,14 @@ test('EXPORT-M Screenshot, PDF and thumbnail authority hold through create, move
     assert.equal(controlThumbnail, true);
     const baselineThumbnail = await page.evaluate(() => window.probe.PackLibrary.getById(window.probe.otherPackId).thumbnail);
 
-    // CREATE through the real tool: Measurement Mode, two clicks on the truck floor.
+    // CREATE through the real tool: the toolbar opens the Measurements manager, its New measurement control arms
+    // creation, then two clicks on the truck floor.
     const rect = await page.evaluate(() => { const r = document.querySelector('#viewport canvas').getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; });
     await page.mouse.move(rect.x + rect.w / 2, rect.y + rect.h - 30);
     await page.click('#btn-editor-measure');
     await page.waitForFunction(() => window.probe.overlay().mode);
+    await page.click('#editor-measure-new');
+    await page.waitForFunction(() => document.getElementById('editor-measure-new').getAttribute('aria-pressed') === 'true');
     await clickAt(page, await page.evaluate(p => window.probe.screenOf(...p), FLOOR_P));
     await clickAt(page, await page.evaluate(p => window.probe.screenOf(...p), FLOOR_Q));
     await page.waitForFunction(id => window.probe.PackLibrary.getMeasurements(id).length === 1, B);
@@ -3242,8 +3245,11 @@ test('EXPORT-M Screenshot, PDF and thumbnail authority hold through create, move
     expectCleanExports(await exportProof(page), 'after delete');
 
     // (The interrupted automatic capture and the never-recapture rule are pinned by the two P2-8 tests above.)
-    await page.click('#btn-editor-measure'); // leave Measurement Mode
-    assert.equal(await page.evaluate(() => window.probe.overlay().mode), false);
+    // Closing the manager ends creation with it: the toolbar reads closed and New measurement is no longer armed.
+    await page.click('#btn-editor-measure');
+    assert.deepEqual(
+      await page.evaluate(() => ({ manager: window.probe.overlay().mode, creating: document.getElementById('editor-measure-new').getAttribute('aria-pressed') })),
+      { manager: false, creating: 'false' }, 'closing the Measurements manager ends creation');
     assert.deepEqual(errors, []);
   } finally {
     await browser.close();

@@ -662,6 +662,244 @@ test('P0 EDITOR UNDO ATOMICITY: PackLibrary.update() without options still creat
   assert.equal(PackLibrary.getById('pack-a').notes, undefined);
 });
 
+// A Pack's derived preview describes the cargo of the history entry it was captured for: Undo/Redo restore the
+// preview that entry holds, and a derived preview write is carried into the entry that is current when it lands.
+// The signature below stands in for the Editor's visual signature (CaseScene.getVisualSignature): a pure function
+// of the cargo a preview depicts, so a preview is current exactly when its signature matches the Pack now.
+function previewSignatureOf(pack) {
+  return JSON.stringify((pack.cases || []).map(inst => [inst.id, inst.caseId, inst.transform && inst.transform.position, inst.hidden]));
+}
+// What an automatic capture writes (app.js capturePackPreview): a derived preview write, never an Undo step.
+function writePreview(PackLibrary, packId, tag, signature = previewSignatureOf(PackLibrary.getById(packId))) {
+  return PackLibrary.updatePreview(packId, {
+    thumbnail: `data:image/jpeg;base64,${tag}`,
+    thumbnailRenderVersion: 3,
+    thumbnailUpdatedAt: 1000,
+    thumbnailSource: 'auto',
+    thumbnailVisualSignature: signature,
+    thumbnailViewSignature: 'view-1',
+  }, { skipHistory: true });
+}
+// What the Packs list would show: the stored image, and whether its signature matches the cargo held now.
+function shownPreview(PackLibrary, packId) {
+  const pack = PackLibrary.getById(packId);
+  return {
+    image: pack.thumbnail ? pack.thumbnail.split(',')[1] : null,
+    fresh: pack.thumbnailVisualSignature === previewSignatureOf(pack),
+  };
+}
+function initPreviewPacks(StateStore, extraPacks = []) {
+  StateStore.init({
+    caseLibrary: [baseCase()],
+    packLibrary: [basePack({ id: 'pack-a', loadPlanNumber: 'LP-000A', title: 'Load Plan A' }), ...extraPacks],
+    folderLibrary: [],
+    preferences: {},
+  });
+}
+const movedTo = (crate, x) => ({ transform: { ...crate.transform, position: { x, y: 5, z: 0 } } });
+
+test('P0 EDITOR UNDO PREVIEW: Undo/Redo across real cargo edits restore the preview captured for each state, including older entries', async () => {
+  const { StateStore, PackLibrary } = await loadModules();
+  initPreviewPacks(StateStore);
+  writePreview(PackLibrary, 'pack-a', 's0');
+  const crate = PackLibrary.addInstance('pack-a', 'case-a', { x: 15, y: 5, z: 0 });
+  writePreview(PackLibrary, 'pack-a', 's1');
+  PackLibrary.updateInstance('pack-a', crate.id, movedTo(crate, 40));
+  writePreview(PackLibrary, 'pack-a', 's2');
+  PackLibrary.addInstance('pack-a', 'case-a', { x: 70, y: 5, z: 0 });
+  writePreview(PackLibrary, 'pack-a', 's3');
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 's3', fresh: true });
+  assert.equal(StateStore.undoDepth(), 3, 'three cargo edits are three Undo steps; the four captures added none');
+
+  const walk = [
+    ['undo', 's2', 1], ['undo', 's1', 1], ['undo', 's0', 0],
+    ['redo', 's1', 1], ['redo', 's2', 1], ['redo', 's3', 2],
+    ['undo', 's2', 1], ['undo', 's1', 1], ['redo', 's2', 1],
+  ];
+  for (const [direction, image, cargo] of walk) {
+    assert.equal(StateStore[direction](), true);
+    assert.equal(PackLibrary.getById('pack-a').cases.length, cargo);
+    assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image, fresh: true }, `${direction} shows the preview captured for that cargo`);
+  }
+});
+
+test("P0 EDITOR UNDO PREVIEW: a state without its own preview never shows a newer state's image as current", async () => {
+  const { StateStore, PackLibrary } = await loadModules();
+  initPreviewPacks(StateStore);
+  writePreview(PackLibrary, 'pack-a', 's0');
+  const crate = PackLibrary.addInstance('pack-a', 'case-a', { x: 15, y: 5, z: 0 });
+  PackLibrary.updateInstance('pack-a', crate.id, movedTo(crate, 40));
+  writePreview(PackLibrary, 'pack-a', 's2');
+
+  assert.equal(StateStore.undo(), true);
+  const unpreviewed = shownPreview(PackLibrary, 'pack-a');
+  assert.equal(unpreviewed.fresh, false, 'its preview is detectably stale, so the scheduler captures it again');
+  assert.notEqual(unpreviewed.image, 's2', "and it is never the newer state's image");
+  assert.equal(StateStore.undo(), true);
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 's0', fresh: true });
+  assert.equal(StateStore.redo(), true);
+  assert.equal(shownPreview(PackLibrary, 'pack-a').fresh, false);
+  assert.equal(StateStore.redo(), true);
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 's2', fresh: true });
+});
+
+test('P0 EDITOR UNDO PREVIEW: an asynchronous preview write lands on the state it arrives in and never adds, drops or crosses an Undo step', async () => {
+  const { StateStore, PackLibrary } = await loadModules();
+  initPreviewPacks(StateStore);
+  writePreview(PackLibrary, 'pack-a', 's0');
+  const inFlight = previewSignatureOf(PackLibrary.getById('pack-a'));
+  PackLibrary.addInstance('pack-a', 'case-a', { x: 15, y: 5, z: 0 });
+  await Promise.resolve();
+  const depth = StateStore.undoDepth();
+  writePreview(PackLibrary, 'pack-a', 'late', inFlight);
+  assert.equal(StateStore.undoDepth(), depth, 'a late write is not an Undo step');
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 'late', fresh: false },
+    'it is stale for the cargo now held, so it is captured again');
+
+  assert.equal(StateStore.undo(), true);
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 's0', fresh: true }, 'the late write did not cross into the older entry');
+  // A refreshed capture of the older state lands while Redo is available: it must not drop the Redo.
+  writePreview(PackLibrary, 'pack-a', 's0b');
+  assert.equal(StateStore.redo(), true, 'a derived write keeps Redo available');
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 'late', fresh: false });
+  assert.equal(StateStore.undo(), true);
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 's0b', fresh: true },
+    'and the older state keeps the capture made while it was current');
+});
+
+test('P0 EDITOR UNDO PREVIEW: Clear Preview is one Undo step that restores the latest image and is redone as cleared', async () => {
+  const { StateStore, PackLibrary } = await loadModules();
+  initPreviewPacks(StateStore);
+  PackLibrary.addInstance('pack-a', 'case-a', { x: 15, y: 5, z: 0 });
+  writePreview(PackLibrary, 'pack-a', 'first');
+  writePreview(PackLibrary, 'pack-a', 'latest');
+  const depth = StateStore.undoDepth();
+  // What clearPackPreview writes: the one recorded preview write.
+  PackLibrary.updatePreview('pack-a', {
+    thumbnail: null, thumbnailUpdatedAt: null, thumbnailSource: null, thumbnailRenderVersion: 3,
+    thumbnailVisualSignature: previewSignatureOf(PackLibrary.getById('pack-a')), thumbnailViewSignature: 'view-1',
+  }, { skipHistory: false });
+  assert.equal(StateStore.undoDepth(), depth + 1, 'Clear Preview is exactly one Undo step');
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: null, fresh: true }, 'cleared, and intentionally so for this cargo');
+
+  assert.equal(StateStore.undo(), true);
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 'latest', fresh: true }, 'Undo brings back the latest image');
+  assert.equal(StateStore.redo(), true);
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: null, fresh: true }, 'Redo clears it again');
+});
+
+test('P0 EDITOR UNDO PREVIEW: only a derived pack-preview write for the Pack just written is carried into the current entry, and no other Pack is touched', async () => {
+  const { StateStore, PackLibrary } = await loadModules();
+  const otherPack = () => basePack({
+    id: 'pack-b', loadPlanNumber: 'LP-000B', title: 'Load Plan B',
+    thumbnail: 'data:image/jpeg;base64,b0', thumbnailVisualSignature: 'sig-b',
+  });
+  const forgedImage = 'data:image/jpeg;base64,forged';
+  // The preview the current entry holds after Undo then Redo back to it.
+  const afterRoundTrip = notificationFor => {
+    initPreviewPacks(StateStore, [otherPack()]);
+    writePreview(PackLibrary, 'pack-a', 's0');
+    PackLibrary.update('pack-a', { notes: 'edit' });
+    const previous = PackLibrary.getById('pack-a');
+    const forged = { ...previous, thumbnail: forgedImage, thumbnailVisualSignature: 'forged' };
+    StateStore.set({ packLibrary: StateStore.get('packLibrary').map(p => (p.id === 'pack-a' ? forged : p)) },
+      { skipHistory: true, notification: notificationFor(previous, forged) });
+    assert.equal(PackLibrary.getById('pack-a').thumbnail, forgedImage, 'the state itself always takes the write');
+    assert.equal(StateStore.undo(), true);
+    assert.equal(StateStore.redo(), true);
+    return PackLibrary.getById('pack-a').thumbnail;
+  };
+  const own = 'data:image/jpeg;base64,s0';
+  assert.equal(afterRoundTrip((previous, forged) => ({ type: 'pack-preview', previousPack: previous, pack: forged })), forgedImage,
+    'a pack-preview notification naming the Pack just written is carried');
+  assert.equal(afterRoundTrip((previous, forged) => ({ type: 'pack-preview', previousPack: previous, pack: { ...forged } })), own,
+    'a notification naming some other object is not trusted');
+  assert.equal(afterRoundTrip((previous, forged) => ({ type: 'pack-preview', previousPack: previous, pack: { ...forged, id: 'missing' } })), own,
+    'an unknown Pack id is ignored');
+  assert.equal(afterRoundTrip((previous, forged) => ({ type: 'pack-view', previousPack: previous, pack: forged })), own,
+    'another notification type is not a preview write');
+  assert.equal(afterRoundTrip(() => undefined), own, 'a write without a notification is not a preview write');
+
+  initPreviewPacks(StateStore, [otherPack()]);
+  const untouched = JSON.stringify(PackLibrary.getById('pack-b'));
+  writePreview(PackLibrary, 'pack-a', 's0');
+  PackLibrary.update('pack-a', { notes: 'edit' });
+  writePreview(PackLibrary, 'pack-a', 'carried');
+  assert.equal(JSON.stringify(PackLibrary.getById('pack-b')), untouched, 'a preview write for one Pack leaves every other Pack alone');
+  assert.equal(StateStore.undo(), true);
+  assert.equal(JSON.stringify(PackLibrary.getById('pack-b')), untouched, 'also across Undo');
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 's0', fresh: true });
+  assert.equal(StateStore.redo(), true);
+  assert.equal(JSON.stringify(PackLibrary.getById('pack-b')), untouched, 'and Redo');
+  assert.equal(shownPreview(PackLibrary, 'pack-a').image, 'carried', 'while the written Pack keeps its capture in the current entry');
+});
+
+test('P0 EDITOR UNDO PREVIEW: a carried preview brings only the preview fields into history, never an unrecorded edit', async () => {
+  const { StateStore, PackLibrary } = await loadModules();
+  initPreviewPacks(StateStore);
+  writePreview(PackLibrary, 'pack-a', 's0');
+  PackLibrary.update('pack-a', { notes: 'recorded' });
+  PackLibrary.update('pack-a', { notes: 'unrecorded' }, { skipHistory: true });
+  writePreview(PackLibrary, 'pack-a', 'carried');
+  assert.equal(PackLibrary.getById('pack-a').notes, 'unrecorded', 'the state itself holds the unrecorded edit');
+  assert.equal(StateStore.undoDepth(), 1, 'and only the recorded edit is a step');
+
+  assert.equal(StateStore.undo(), true);
+  assert.equal(PackLibrary.getById('pack-a').notes, undefined);
+  assert.deepEqual(shownPreview(PackLibrary, 'pack-a'), { image: 's0', fresh: true });
+  assert.equal(StateStore.redo(), true);
+  assert.equal(PackLibrary.getById('pack-a').notes, 'recorded', 'history holds the recorded edit, not the unrecorded one');
+  assert.equal(shownPreview(PackLibrary, 'pack-a').image, 'carried', 'while the entry kept the preview written after it');
+});
+
+test('P0 EDITOR UNDO PREVIEW: a late derived write after the Editor session is re-established creates no step and cannot expose older history', async () => {
+  const { StateStore, PackLibrary, AppShell } = await loadAppShellHarness();
+  StateStore.init({
+    caseLibrary: [baseCase()],
+    packLibrary: [basePack({ id: 'pack-a', loadPlanNumber: 'LP-000A', title: 'Load Plan A' })],
+    folderLibrary: [],
+    preferences: {},
+    currentScreen: 'packs',
+  });
+  PackLibrary.open('pack-a');
+  AppShell.navigate('editor');
+  PackLibrary.update('pack-a', { notes: 'old-session-edit' });
+  AppShell.navigate('cases');
+  AppShell.navigate('editor');
+
+  // An automatic capture started in the old session resolves after Editor re-established its baseline.
+  writePreview(PackLibrary, 'pack-a', 'late');
+  assert.equal(StateStore.undoDepth(), 0, 'the late write is not an Undo step');
+  assert.equal(StateStore.undo(), false, 'and Undo cannot reach the pre-exit session');
+  assert.equal(PackLibrary.getById('pack-a').notes, 'old-session-edit');
+
+  PackLibrary.update('pack-a', { notes: 'new-session-edit' });
+  assert.equal(StateStore.undo(), true);
+  assert.equal(PackLibrary.getById('pack-a').notes, 'old-session-edit');
+  assert.equal(shownPreview(PackLibrary, 'pack-a').image, 'late', 'the session baseline carries the late preview');
+});
+
+test("P0 EDITOR UNDO: Undo/Redo restore each Pack's exact historical lastEdited, including a Pack that never had one", async () => {
+  const { StateStore, PackLibrary } = await loadModules();
+  initPreviewPacks(StateStore, [basePack({ id: 'pack-b', loadPlanNumber: 'LP-000B', title: 'Load Plan B', lastEdited: 5 })]);
+  assert.equal(Object.hasOwn(PackLibrary.getById('pack-a'), 'lastEdited'), false, 'fixture: pack-a has no lastEdited');
+  PackLibrary.update('pack-a', { notes: 'edit a' });
+  const editedA = PackLibrary.getById('pack-a').lastEdited;
+  PackLibrary.update('pack-b', { notes: 'edit b' });
+  const editedB = PackLibrary.getById('pack-b').lastEdited;
+  assert.ok(editedA > 5 && editedB > 5, 'each edit moves lastEdited');
+
+  assert.equal(StateStore.undo(), true);
+  assert.equal(PackLibrary.getById('pack-b').lastEdited, 5, 'Undo restores the time the Pack had');
+  assert.equal(PackLibrary.getById('pack-a').lastEdited, editedA);
+  assert.equal(StateStore.undo(), true);
+  assert.equal(Object.hasOwn(PackLibrary.getById('pack-a'), 'lastEdited'), false, 'and invents none for a Pack that had none');
+  assert.equal(StateStore.redo(), true);
+  assert.equal(PackLibrary.getById('pack-a').lastEdited, editedA);
+  assert.equal(StateStore.redo(), true);
+  assert.equal(PackLibrary.getById('pack-b').lastEdited, editedB);
+});
+
 test('P0 EDITOR UNDO ATOMICITY: Hide/Show batch commits and reverts N instances in one Undo/Redo step', async () => {
   const { StateStore, PackLibrary } = await loadModules();
   const instA = insideInstance({ id: 'inst-a' });
