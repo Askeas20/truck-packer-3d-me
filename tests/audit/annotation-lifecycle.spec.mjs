@@ -1713,3 +1713,52 @@ test('Undo and Redo keep the current view and thumbnail, and history never cross
   assert.equal(StateStore.undo(), false, 'and returning to A does not revive the earlier steps');
   assert.equal(PackLibrary.getAnnotations('A').length, 1, 'A keeps its saved content');
 });
+
+test('whole-object move: an Arrow or Measurement is carried rigidly along ONE surface as one undoable write, and anything else is refused', () => {
+  seed([makePack('A', { cases: [solidInstance('i1'), { ...solidInstance('i2'), transform: { ...solidInstance('i2').transform, position: { x: 120, y: 16, z: 0 } } }] })]);
+  const top = (id, x, z) => onCargo(id, { x, y: 16, z });
+  const arrow = PackLibrary.addArrow('A', { start: ground(0, 60), end: ground(40, 60), color: 'ink', width: 'bold', style: 'dashed' });
+  const meas = PackLibrary.addMeasurement('A', { start: top('i1', -12, -6), end: top('i1', 12, 6), label: 'Top run' });
+  assert.deepEqual([arrow.ok, meas.ok], [true, true]);
+  const shape = record => JSON.stringify({ ...record, start: null, end: null, updatedAt: 0 });
+  const reach = (start, end) => Math.hypot(...['x', 'y', 'z'].map(axis => (end.position || end.local)[axis] - (start.position || start.local)[axis]));
+
+  // A ground Arrow: both ends shift by the same snapped offset, everything else (including length) is kept.
+  const arrowMoved = PackLibrary.moveArrow('A', arrow.annotation.id, 5.004, -3);
+  assert.equal(arrowMoved.ok, true);
+  const arrowNow = PackLibrary.getAnnotations('A').find(record => record.id === arrow.annotation.id);
+  assert.deepEqual([arrowNow.start.position, arrowNow.end.position], [{ x: 5, y: 0, z: 57 }, { x: 45, y: 0, z: 57 }]);
+  assert.equal(shape(arrowNow), shape(arrow.annotation), 'name, color, width, style and identity are untouched');
+  assert.equal(reach(arrowNow.start, arrowNow.end), reach(arrow.annotation.start, arrow.annotation.end));
+  assert.equal(StateStore.undo(), true);
+  assert.deepEqual(PackLibrary.getAnnotations('A').find(record => record.id === arrow.annotation.id).start, arrow.annotation.start, 'one Undo step restores it');
+  assert.equal(StateStore.redo(), true);
+
+  // A Measurement on one cargo face: both ends move inside that face, the label and the surface stay.
+  const measMoved = PackLibrary.moveMeasurement('A', meas.measurement.id, 2, 1);
+  assert.equal(measMoved.ok, true);
+  const measNow = PackLibrary.getMeasurements('A').find(record => record.id === meas.measurement.id);
+  assert.deepEqual([measNow.start.local, measNow.end.local], [{ x: -10, y: 16, z: -5 }, { x: 14, y: 16, z: 7 }]);
+  assert.deepEqual([measNow.label, measNow.start.instanceId], ['Top run', 'i1']);
+
+  // A refused move writes nothing and keeps Redo: off the face, an unchanged offset, a pair that does not share one surface.
+  const before = snapshotOf();
+  const refusals = [
+    PackLibrary.moveMeasurement('A', meas.measurement.id, 40, 0), // leaves the cargo face
+    PackLibrary.moveMeasurement('A', meas.measurement.id, Number.NaN, 0),
+    PackLibrary.moveArrow('A', arrow.annotation.id, Number.POSITIVE_INFINITY, 0),
+  ];
+  assert.deepEqual(refusals.map(outcome => outcome.ok), [false, false, false]);
+  assert.equal(snapshotOf(), before, 'a refused move writes nothing');
+  assert.equal(PackLibrary.moveArrow('A', arrow.annotation.id, 0.004, 0).unchanged, true, 'an offset that snaps to zero is no edit');
+  assert.equal(PackLibrary.checkMeasurementMove('A', meas.measurement.id, 1, 0).dryRun, true);
+  assert.equal(snapshotOf(), before, 'and a dry-run verdict writes nothing');
+
+  const mixed = PackLibrary.addMeasurement('A', { start: top('i1', 0, 0), end: ground(100, 40) });
+  assert.equal(mixed.ok, true);
+  assert.equal(PackLibrary.moveMeasurement('A', mixed.measurement.id, 1, 1).reason, 'invalid', 'cargo and ground are not one surface');
+  const otherCargo = PackLibrary.addMeasurement('A', { start: top('i1', 0, 0), end: top('i2', 0, 0) });
+  assert.equal(PackLibrary.moveMeasurement('A', otherCargo.measurement.id, 1, 1).reason, 'invalid', 'two cargo items are not one surface');
+  const edge = PackLibrary.addArrow('A', { start: onCargo('i1', { x: -10, y: 16, z: 12 }), end: onCargo('i1', { x: 10, y: 16, z: 12 }) });
+  assert.equal(PackLibrary.moveArrow('A', edge.annotation.id, 0, 1).reason, 'invalid', 'two points on a shared edge could be on either face, so the move is ambiguous');
+});

@@ -52,6 +52,7 @@ import {
   patchContains,
   resolveAnchor,
   resolveDrawVertices,
+  translateAnchorPair,
   validateAnchorRecord,
   validateDrawSurface,
 } from './measurements.js';
@@ -365,6 +366,26 @@ export function replaceArrowEndpoint(record, which, anchor, now) {
   if (which !== 'start' && which !== 'end') return null;
   if (!isRecord(record) || record.type !== ANNOTATION_TYPE_ARROW || !isFiniteNumber(now)) return null;
   const next = { ...record, [which]: anchor, updatedAt: now };
+  return validateArrowRecord(next) ? null : canonicalArrowRecord(next);
+}
+
+/**
+ * Pure rigid move of a whole arrow: both endpoints by the same in-plane offset `(du, dv)` (inches, snapped to the
+ * 0.01 grid), so its length, direction, name, color, width, style, hidden flag, identity and creation time are
+ * preserved. Only when both endpoints sit on ONE physical surface (see translateAnchorPair); otherwise null and the
+ * endpoints stay individually movable. An offset that snaps to zero returns the arrow unchanged (same `updatedAt`),
+ * anything else gets `updatedAt = now`. Whether the moved ends still resolve on the current layout is judged at write time.
+ * @param {Record<string, any>} record
+ * @param {number} du
+ * @param {number} dv
+ * @param {number} now
+ */
+export function translateArrowRecord(record, du, dv, now) {
+  if (!isRecord(record) || record.type !== ANNOTATION_TYPE_ARROW || !isFiniteNumber(now) || validateArrowRecord(record)) return null;
+  const moved = translateAnchorPair(record.start, record.end, du, dv);
+  if (!moved) return null;
+  if (moved.du === 0 && moved.dv === 0) return canonicalArrowRecord(record);
+  const next = { ...record, start: moved.start, end: moved.end, updatedAt: now };
   return validateArrowRecord(next) ? null : canonicalArrowRecord(next);
 }
 

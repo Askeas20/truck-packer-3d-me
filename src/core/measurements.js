@@ -1329,6 +1329,123 @@ export function drawLift(anchor, face, u, v) {
   return lifted;
 }
 
+// ----------------------------------------------------------------------------
+// Rigid pair moves (a whole Arrow or Measurement carried along ONE surface)
+// ----------------------------------------------------------------------------
+// Both endpoints move by the same in-plane offset, so the length, direction and everything else about the
+// pair is preserved. That is only well defined when the two anchors sit on one physical surface in one
+// coordinate frame: the same cargo face, or the same floor, ground, wall or ceiling plane of the same
+// truck evidence. A shared plane direction alone is not proof (two different cargo, a floor and the
+// ground, or two walls facing the same way are different surfaces), so anything else is refused here and
+// the endpoints stay individually movable.
+
+/** How far apart (inches) two anchors' coordinates along the surface normal may be and still be one plane. */
+const RIGID_PLANE_TOLERANCE_INCHES = 0.01;
+
+/**
+ * Whether two anchors share one surface a pair can be carried along, and in which frame. For cargo that is
+ * exactly ONE supported face holding both points (two points on a shared edge could belong to either face,
+ * so that is refused as ambiguous); for everything else it is the one plane of the same floor, ground, wall
+ * or ceiling, with the same truck evidence on a truck-bound surface.
+ * @param {Record<string, any>} start
+ * @param {Record<string, any>} end
+ * @returns {{ ok: true, key: string, face: string | undefined }
+ *   | { ok: false, reason: 'invalid' | 'mixed' | 'different-cargo' | 'unsupported' | 'ambiguous' | 'no-common-surface' }}
+ */
+export function rigidMoveFrame(start, end) {
+  if (!isRecord(start) || !isRecord(end) || validateAnchor(start, 'start') || validateAnchor(end, 'end')) return { ok: false, reason: 'invalid' };
+  if (start.kind !== end.kind) return { ok: false, reason: 'mixed' };
+  if (start.kind === 'cargo') {
+    if (instanceIdentityKey(start.instanceId) !== instanceIdentityKey(end.instanceId) || !signaturesMatch(start.signature, end.signature)) {
+      return { ok: false, reason: 'different-cargo' };
+    }
+    if (!isRecord(start.local) || !isRecord(end.local)) return { ok: false, reason: 'unsupported' };
+    const common = BOX_FACES.filter(face => {
+      const patch = cargoFacePatch(face, start.signature);
+      const frame = FACE_FRAME[face];
+      return Boolean(patch) && [start.local, end.local].every(local => isCargoPointOnFacePlane(face, local, start.signature) &&
+        patchContains(patch, local[frame.u], local[frame.v]));
+    });
+    if (common.length === 1) return { ok: true, key: common[0], face: common[0] };
+    return { ok: false, reason: common.length ? 'ambiguous' : 'no-common-surface' };
+  }
+  const key = drawFrameKey(start, undefined);
+  if (!key) return { ok: false, reason: 'unsupported' };
+  if (start.surface !== end.surface) return { ok: false, reason: 'mixed' };
+  const frame = FACE_FRAME[key];
+  if (Math.abs(start.position[frame.normal] - end.position[frame.normal]) > RIGID_PLANE_TOLERANCE_INCHES) return { ok: false, reason: 'no-common-surface' };
+  if (TRUCK_BOUND_SURFACES.has(start.surface) && JSON.stringify(start.truck) !== JSON.stringify(end.truck)) return { ok: false, reason: 'no-common-surface' };
+  return { ok: true, key, face: undefined };
+}
+
+/**
+ * Pure rigid move of an anchor pair by one in-plane offset `(du, dv)` in their shared frame (inches). The offset
+ * is snapped to the 0.01 in grid, both coordinates move at their own 4-decimal precision and keep their
+ * coordinate along the surface normal; every other field of both anchors is carried over. Null when the pair
+ * does not share one surface (see rigidMoveFrame) or the offset is not finite. Whether the moved pair is still on
+ * its physical patch, and still resolves, needs the layout and is judged at write time (rigidMoveHeld, resolution).
+ * @param {Record<string, any>} start
+ * @param {Record<string, any>} end
+ * @param {number} du
+ * @param {number} dv
+ * @returns {{ start: Record<string, any>, end: Record<string, any>, du: number, dv: number, key: string, face: string | undefined } | null}
+ */
+export function translateAnchorPair(start, end, du, dv) {
+  if (!isFiniteNumber(du) || !isFiniteNumber(dv)) return null;
+  const frame = rigidMoveFrame(start, end);
+  if (!frame.ok) return null;
+  const axes = FACE_FRAME[frame.key];
+  const offset = [Math.round(du * 100) / 100 + 0, Math.round(dv * 100) / 100 + 0];
+  const shift = anchor => {
+    const home = anchor.kind === 'cargo' ? 'local' : 'position';
+    const next = { ...anchor, [home]: { ...anchor[home] } };
+    next[home][axes.u] = round(next[home][axes.u] + offset[0], 4);
+    next[home][axes.v] = round(next[home][axes.v] + offset[1], 4);
+    return next;
+  };
+  return { start: shift(start), end: shift(end), du: offset[0], dv: offset[1], key: frame.key, face: frame.face };
+}
+
+/**
+ * Whether ONE physical patch of the current layout holds the pair both where it is and where a move would put it,
+ * so a move can never carry it onto a second zone, wall piece, or off the edge of its cargo face.
+ * @param {{ key: string, face: string | undefined }} frame from rigidMoveFrame
+ * @param {{ start: Record<string, any>, end: Record<string, any> }} before
+ * @param {{ start: Record<string, any>, end: Record<string, any> }} after
+ * @param {Parameters<typeof resolveAnchor>[1]} context
+ */
+export function rigidMoveHeld(frame, before, after, context) {
+  const axes = FACE_FRAME[frame.key];
+  if (!axes) return false;
+  const flat = [before.start, before.end, after.start, after.end].flatMap(anchor => {
+    const point = anchor.kind === 'cargo' ? anchor.local : anchor.position;
+    return [point[axes.u], point[axes.v]];
+  });
+  const patches = before.start.kind === 'cargo' ? [cargoFacePatch(frame.face, before.start.signature)] : drawSurfacePatches(before.start, context);
+  return patches.some(patch => patchContainsAll(patch, flat));
+}
+
+/**
+ * Pure rigid move of a whole point-to-point record: both endpoints by the same in-plane offset. The label,
+ * identity and creation time are preserved; the distance is still derived, never stored. An offset that snaps to
+ * zero returns the record unchanged (same `updatedAt`), anything else gets `updatedAt = now`. Null for a record
+ * that is not valid, a pair that does not share one surface, a non-finite offset or an invalid result.
+ * @param {Record<string, any>} record
+ * @param {number} du
+ * @param {number} dv
+ * @param {number} now
+ * @returns {Record<string, any> | null}
+ */
+export function translateMeasurementRecord(record, du, dv, now) {
+  if (!isRecord(record) || record.type !== MEASUREMENT_TYPE_POINT_TO_POINT || !isFiniteNumber(now)) return null;
+  if (validatePointRecord(record)) return null;
+  const moved = translateAnchorPair(record.start, record.end, du, dv);
+  if (!moved) return null;
+  if (moved.du === 0 && moved.dv === 0) return canonicalPointRecord(record);
+  const next = { ...record, start: moved.start, end: moved.end, updatedAt: now };
+  return validatePointRecord(next) ? null : canonicalPointRecord(next);
+}
+
 /**
  * What a stroke's anchor and face must satisfy on their own, with no Load Plan around them. Run after
  * validateAnchor. Cargo: the new local-point encoding, a face this cargo supports, the point on that
