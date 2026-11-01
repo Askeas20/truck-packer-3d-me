@@ -4717,7 +4717,7 @@ test('freehand freezes: the stroke ends where the surface ends, where something 
   // Excessive gap: a jump of well over 160 px freezes the stroke at the last verified sample.
   const gapStart = await screenPoints(page, [[150, 0, -30], [162, 0, -22]]);
   let jump = null;
-  for (const candidate of [[400, 0, 40], [450, 0, 30], [500, 0, -20], [330, 0, 45], [250, 0, 45]]) {
+  for (const candidate of [[400, 0, 40], [450, 0, 30], [500, 0, -20], [330, 0, 45], [250, 0, 45], [-150, 0, 40], [-100, 0, -40], [0, 0, 45], [-200, 0, 0]]) {
     const at = await point(page, ...candidate);
     const clear = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y) === document.querySelector('#viewport canvas'), at);
     if (clear && Math.hypot(at.x - gapStart[1].x, at.y - gapStart[1].y) > 180) { jump = at; break; }
@@ -5103,7 +5103,13 @@ test('freehand Needs Review and Unresolved strokes stay in the panel with a reas
   assert.equal(await page.evaluate(id => window.probe.resolved().find(r => r.id === id).status !== 'valid', stroke.id), true);
   assert.equal(await page.evaluate(() => JSON.stringify(window.probe.annotations())), stored, 'the record is kept verbatim');
   assert.equal((await groupFor(page, ground.id)).color, 'ink', 'the valid ground stroke is still drawn');
-  assert.equal(await page.evaluate(id => document.querySelector(`.tp3d-annot-row[data-annot-id="${id}"] .tp3d-annot-row__edit`)?.hidden ?? true, stroke.id), true, 'a drawing has no text editor');
+  // The row's Edit control renames a drawing in place (optional name); a drawing never opens the Callout text editor.
+  await page.click(`.tp3d-annot-row[data-annot-id="${stroke.id}"] .tp3d-annot-row__edit`);
+  await page.waitForSelector(`.tp3d-annot-row[data-annot-id="${stroke.id}"] .tp3d-annot-row__rename:not([hidden])`);
+  assert.equal(await page.evaluate(() => Boolean(document.querySelector('.tp3d-annot-editor__textarea'))), false, 'a drawing has a name field, not a text editor');
+  await page.keyboard.press('Escape');
+  await page.waitForSelector(`.tp3d-annot-row[data-annot-id="${stroke.id}"] .tp3d-annot-row__rename[hidden]`, { state: 'attached' });
+  assert.equal(await page.evaluate(() => JSON.stringify(window.probe.annotations())), stored, 'cancelling the rename leaves the record verbatim');
 
   // The cargo returns and the stroke is drawn again from the same record.
   await page.evaluate(plan => { const { StateStore } = window.probe; StateStore.set({ packLibrary: JSON.parse(plan) }, { skipHistory: true }); }, withCargo);
@@ -6890,7 +6896,7 @@ test('annotation drawing clipped: a stroke whose segment crosses the view with b
   assert.deepEqual(errors, []);
 });
 
-test('annotation drawing look: a Dotted line is clean dots with no ring, a Dashed one keeps clear gaps, the selection is a restrained accent edge that keeps the line\'s color and weight, the pattern follows the stroke\'s size on screen, and Arrows are untouched', { timeout: 420000 }, async t => {
+test('annotation drawing look: a Dotted line is clean dots with no ring, a Dashed one keeps clear gaps, the selection is a restrained accent edge that keeps the line\'s color and weight, the pattern follows the stroke\'s size on screen, and a Dotted Arrow shares the Drawing edge', { timeout: 420000 }, async t => {
   const browser = await launch();
   t.after(() => browser.close());
   const { page, errors } = await openPanel(browser, { width: 1400, height: 900 });
@@ -6999,9 +7005,9 @@ test('annotation drawing look: a Dotted line is clean dots with no ring, a Dashe
   await clearSelection();
   await page.evaluate(() => { document.documentElement.setAttribute('data-theme', 'light'); });
 
-  // Arrows share the line patterns but not a drawing's look, and this change leaves them exactly as they were.
+  // Arrows share the line patterns but not a drawing's look. A Dotted arrow's shaft uses the drawing's neutral edge (3 px line + 1.5 px edge = 4.5, since 841bf78).
   const arrows = await lineLook(page);
-  assert.deepEqual([arrows[arrowDot.id].line.width, arrows[arrowDot.id].halo.width, dashes(arrows[arrowDot.id].line.dash), arrows[arrowDot.id].halo.cap], [3, 7, [0.01, 10], 'round'], 'a Regular Dotted arrow keeps its ring and spacing');
+  assert.deepEqual([arrows[arrowDot.id].line.width, arrows[arrowDot.id].halo.width, dashes(arrows[arrowDot.id].line.dash), arrows[arrowDot.id].halo.cap], [3, 4.5, [0.01, 10], 'round'], 'a Regular Dotted arrow has the drawing edge and keeps its spacing');
   assert.deepEqual([arrows[arrowDash.id].line.width, arrows[arrowDash.id].halo.width, dashes(arrows[arrowDash.id].line.dash)], [5, 9, [20, 12.5]], 'a Bold Dashed arrow keeps its pattern and edge');
   assert.equal(await writes(page), 0, 'nothing here wrote a record');
   assert.deepEqual(errors, []);
