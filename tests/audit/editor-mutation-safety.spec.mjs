@@ -1464,13 +1464,17 @@ test('P0 EDITOR-ONLY UNDO/REDO: keyboard Undo does not reach StateStore.undo() o
   const keyboardSrc = await fs.readFile(keyboardManagerPath, 'utf8');
   const start = keyboardSrc.indexOf('function undo()');
   assert.ok(start >= 0, 'function undo() must exist');
-  const block = keyboardSrc.slice(start, start + 260);
-  const guardIdx = block.indexOf('if (!inEditor()) return false;');
+  const block = keyboardSrc.slice(start, start + 520);
+  // Outside Editor the only reachable path is the Load Plans Folder provider (F-08), never StateStore directly.
+  const guardLine = 'if (!inEditor()) return Boolean(folderHistory && folderHistory.undo());';
+  const guardIdx = block.indexOf(guardLine);
   const busyGuardIdx = block.indexOf('if (mutationBlockedWhileBusy()) return true;');
   const storeCallIdx = block.indexOf('StateStore.undo()');
-  assert.ok(guardIdx >= 0, 'undo() must check inEditor() before mutating StateStore');
+  assert.ok(guardIdx >= 0, 'undo() must check inEditor() before mutating StateStore and route only to folderHistory outside Editor');
   assert.ok(busyGuardIdx > guardIdx, 'undo() must still preserve the existing busy guard inside Editor');
   assert.ok(storeCallIdx > busyGuardIdx, 'undo() must still call StateStore.undo() inside Editor after both guards');
+  assert.equal(block.match(/StateStore\.undo\(\)/g).length, 1,
+    'undo() must reach StateStore.undo() exactly once, on the Editor path only');
   assert.match(block, /UIComponents\.showToast\(ok \? 'Undone' : 'Nothing to undo'/,
     'undo() must preserve its existing toast behavior inside Editor');
 });
@@ -1479,13 +1483,17 @@ test('P0 EDITOR-ONLY UNDO/REDO: keyboard Redo does not reach StateStore.redo() o
   const keyboardSrc = await fs.readFile(keyboardManagerPath, 'utf8');
   const start = keyboardSrc.indexOf('function redo()');
   assert.ok(start >= 0, 'function redo() must exist');
-  const block = keyboardSrc.slice(start, start + 260);
-  const guardIdx = block.indexOf('if (!inEditor()) return false;');
+  const block = keyboardSrc.slice(start, start + 520);
+  // Outside Editor the only reachable path is the Load Plans Folder provider (F-08), never StateStore directly.
+  const guardLine = 'if (!inEditor()) return Boolean(folderHistory && folderHistory.redo());';
+  const guardIdx = block.indexOf(guardLine);
   const busyGuardIdx = block.indexOf('if (mutationBlockedWhileBusy()) return true;');
   const storeCallIdx = block.indexOf('StateStore.redo()');
-  assert.ok(guardIdx >= 0, 'redo() must check inEditor() before mutating StateStore');
+  assert.ok(guardIdx >= 0, 'redo() must check inEditor() before mutating StateStore and route only to folderHistory outside Editor');
   assert.ok(busyGuardIdx > guardIdx, 'redo() must still preserve the existing busy guard inside Editor');
   assert.ok(storeCallIdx > busyGuardIdx, 'redo() must still call StateStore.redo() inside Editor after both guards');
+  assert.equal(block.match(/StateStore\.redo\(\)/g).length, 1,
+    'redo() must reach StateStore.redo() exactly once, on the Editor path only');
   assert.match(block, /UIComponents\.showToast\(ok \? 'Redone' : 'Nothing to redo'/,
     'redo() must preserve its existing toast behavior inside Editor');
 });
