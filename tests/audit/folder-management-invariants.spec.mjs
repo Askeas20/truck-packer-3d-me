@@ -1612,9 +1612,14 @@ test('Stage 1 F-03 load keeps a damaged Folder graph as stored and preserves the
       'the original assignments are kept');
     const firstRaw = localStorage.getItem(evidenceKey);
 
+    Storage.load();
+    assert.equal(localStorage.getItem(evidenceKey), firstRaw, 'reloading the same damaged data adds no second copy');
+
     localStorage.setItem(workspaceKey, payload({ folderLibrary: [] }));
     Storage.load();
-    assert.equal(localStorage.getItem(evidenceKey), firstRaw, 'the first copy is never overwritten');
+    const afterSecond = JSON.parse(localStorage.getItem(evidenceKey));
+    assert.deepEqual(afterSecond.folderLibrary, fixture.folderLibrary, 'the first copy is never overwritten');
+    assert.equal(afterSecond.laterRecords.length, 1, 'a different damaged state is kept beside it');
 
     const cleanKey = 'truckPacker3d:v1:user-f03:workspace:org-clean';
     Storage.setWorkspaceScope('org-clean');
@@ -1635,6 +1640,193 @@ test('Stage 1 F-03 load keeps a damaged Folder graph as stored and preserves the
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
   }
+});
+
+// ---- Folder repair evidence: every distinct damaged graph is kept, within a limit, and a refusal blocks the repair ----
+
+async function withEvidenceStorage(tag, run) {
+  const Storage = await import(`${storagePath.href}?${tag}=${Date.now()}-${Math.random()}`);
+  const originalWindow = globalThis.window;
+  const localStorage = makeFlakyLocalStorage();
+  globalThis.window = { localStorage };
+  Storage.setStorageScope('user-ev');
+  Storage.setWorkspaceScope('org-a');
+  const evidenceKey = org => `truckPacker3d:v1:user-ev:workspace:${org}:folder-graph-evidence`;
+  try {
+    await run({ Storage, localStorage, evidenceKey });
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+}
+
+// A damaged graph (two Folders sharing an id, and a Load Plan pointing at it); `tag` makes each episode different.
+function evidenceEpisode(tag) {
+  const folder = name => ({ id: `f-${tag}`, name, scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1 });
+  return { folders: [folder(`${tag} one`), folder(`${tag} two`)], packs: [{ id: `p-${tag}`, title: 'Plan', folderId: `f-${tag}` }] };
+}
+
+test('Stage 1 evidence: the first episode is kept, a different one is kept beside it and an identical one adds nothing', async () => {
+  await withEvidenceStorage('ev1', async ({ Storage, localStorage, evidenceKey }) => {
+    const [e1, e2, e3] = ['a', 'b', 'c'].map(evidenceEpisode);
+    const key = evidenceKey('org-a');
+    const read = () => JSON.parse(localStorage.getItem(key));
+
+    const first = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs);
+    assert.deepEqual([first.ok, first.records], [true, 1], 'the first episode is stored');
+    assert.deepEqual(read().folderLibrary, e1.folders);
+    assert.deepEqual(read().packFolderRefs, [{ id: 'p-a', folderId: 'f-a' }]);
+    assert.equal(read().laterRecords, undefined, 'a single episode is the original single-record format');
+
+    const reordered = e1.folders.map(f => Object.fromEntries(Object.entries(f).reverse()));
+    const rawBefore = localStorage.getItem(key);
+    const again = Storage.preserveFolderGraphEvidence(reordered, e1.packs);
+    assert.deepEqual([again.ok, again.existing, again.records], [true, true, 1], 'the same data (any key order) is already kept');
+    assert.equal(localStorage.getItem(key), rawBefore, 'an identical episode writes nothing');
+
+    const second = Storage.preserveFolderGraphEvidence(e2.folders, e2.packs);
+    assert.deepEqual([second.ok, second.records], [true, 2], 'a different second episode is also kept');
+    assert.deepEqual(read().folderLibrary, e1.folders, 'the first episode is untouched at the top level');
+    assert.deepEqual(read().laterRecords.map(r => r.folderLibrary), [e2.folders]);
+    assert.deepEqual(read().laterRecords[0].packFolderRefs, [{ id: 'p-b', folderId: 'f-b' }]);
+
+    const afterSecond = localStorage.getItem(key);
+    assert.equal(Storage.preserveFolderGraphEvidence(e2.folders, e2.packs).existing, true, 'repeating the second episode adds nothing');
+    assert.equal(Storage.preserveFolderGraphEvidence(e1.folders, e1.packs).existing, true, 'repeating the first episode adds nothing');
+    assert.equal(localStorage.getItem(key), afterSecond);
+
+    assert.equal(Storage.preserveFolderGraphEvidence(e3.folders, e3.packs).records, 3, 'a third distinct episode is kept too');
+    assert.deepEqual(read().laterRecords.map(r => r.folderLibrary), [e2.folders, e3.folders]);
+  });
+});
+
+test('Stage 1 evidence: a single-record copy made before this change stays readable and untouched', async () => {
+  await withEvidenceStorage('ev2', async ({ Storage, localStorage, evidenceKey }) => {
+    const [e1, e2] = ['a', 'b'].map(evidenceEpisode);
+    const key = evidenceKey('org-a');
+    const original = JSON.stringify({
+      kind: 'folder-graph-evidence', version: 1, capturedAt: 111, folderLibrary: e1.folders,
+      packFolderRefs: [{ id: 'p-a', folderId: 'f-a' }],
+    });
+    localStorage.setItem(key, original);
+
+    const same = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs);
+    assert.deepEqual([same.ok, same.existing, same.records], [true, true, 1], 'the old copy counts as the first episode');
+    assert.equal(localStorage.getItem(key), original, 'it is not rewritten');
+
+    const added = Storage.preserveFolderGraphEvidence(e2.folders, e2.packs);
+    assert.deepEqual([added.ok, added.records], [true, 2]);
+    const parsed = JSON.parse(localStorage.getItem(key));
+    // A reader that only knows the single-record format still reads the original episode, field for field.
+    assert.deepEqual(
+      [parsed.kind, parsed.version, parsed.capturedAt, parsed.folderLibrary, parsed.packFolderRefs],
+      ['folder-graph-evidence', 1, 111, e1.folders, [{ id: 'p-a', folderId: 'f-a' }]]
+    );
+    assert.equal(parsed.laterRecords.length, 1);
+  });
+});
+
+test('Stage 1 evidence: a refused write keeps what is stored, reports it, and the repair flow stops before it changes anything', async () => {
+  await withEvidenceStorage('ev3', async ({ Storage, localStorage, evidenceKey }) => {
+    const [e1, e2] = ['a', 'b'].map(evidenceEpisode);
+    const key = evidenceKey('org-a');
+    const workspaceKey = 'truckPacker3d:v1:user-ev:workspace:org-a';
+    localStorage.setItem(workspaceKey, JSON.stringify({ folderLibrary: e2.folders, packLibrary: e2.packs }));
+    const workspaceBefore = localStorage.getItem(workspaceKey);
+    const graphBefore = JSON.stringify([e2.folders, e2.packs]);
+
+    localStorage.failWrites = true;
+    const none = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs);
+    assert.deepEqual([none.ok, none.reason], [false, 'storage'], 'a refused first write is reported');
+    assert.equal(localStorage.getItem(key), null);
+    localStorage.failWrites = false;
+
+    Storage.preserveFolderGraphEvidence(e1.folders, e1.packs);
+    const keptRaw = localStorage.getItem(key);
+    localStorage.failWrites = true;
+    const refused = Storage.preserveFolderGraphEvidence(e2.folders, e2.packs);
+    assert.deepEqual([refused.ok, refused.reason], [false, 'storage'], 'a refused later write is reported');
+    assert.equal(localStorage.getItem(key), keptRaw, 'the stored evidence is exactly what it was');
+    assert.equal(localStorage.getItem(workspaceKey), workspaceBefore, 'the damaged workspace data is untouched');
+    assert.equal(JSON.stringify([e2.folders, e2.packs]), graphBefore, 'the graph that was passed in is not changed');
+
+    // The Repair action stops on any refusal, before FolderLibrary.repairFolderGraph() can run, and says so.
+    const packsSrc = await fs.readFile(packsScreenPath, 'utf8');
+    const flow = packsSrc.slice(packsSrc.indexOf('async function repairFolderDataWithConfirm'), packsSrc.indexOf('function movePackToFolder('));
+    assert.match(flow, /preserveFolderEvidence\(guard\.scope\)/, 'the copy is bound to the dialog\'s user and workspace');
+    const refusal = flow.indexOf('kept.ok !== true');
+    assert.ok(refusal > 0 && refusal < flow.indexOf('FolderLibrary.repairFolderGraph()'), 'the copy is checked before the repair runs');
+    assert.match(flow.slice(refusal, flow.indexOf('FolderLibrary.repairFolderGraph()')), /showToast\([\s\S]*'error'[\s\S]*return;/,
+      'a refusal shows an error and returns without repairing');
+  });
+});
+
+test('Stage 1 evidence: the record and size limits refuse safely and never overwrite or drop a copy', async () => {
+  await withEvidenceStorage('ev4', async ({ Storage, localStorage, evidenceKey }) => {
+    const key = evidenceKey('org-a');
+    const episodes = ['a', 'b', 'c', 'd', 'e', 'f'].map(evidenceEpisode);
+    episodes.slice(0, Storage.MAX_FOLDER_EVIDENCE_RECORDS).forEach(e => {
+      assert.equal(Storage.preserveFolderGraphEvidence(e.folders, e.packs).ok, true);
+    });
+    const full = localStorage.getItem(key);
+    assert.equal(JSON.parse(full).laterRecords.length, Storage.MAX_FOLDER_EVIDENCE_RECORDS - 1, 'the limit is reached');
+
+    const over = episodes[5];
+    const refused = Storage.preserveFolderGraphEvidence(over.folders, over.packs);
+    assert.deepEqual([refused.ok, refused.reason], [false, 'limit']);
+    assert.match(refused.message, /already keeps 5 recovery copies/);
+    assert.equal(localStorage.getItem(key), full, 'nothing is overwritten or dropped at the limit');
+    assert.equal(Storage.preserveFolderGraphEvidence(episodes[2].folders, episodes[2].packs).existing, true,
+      'a copy that is already kept is still recognised at the limit');
+  });
+  await withEvidenceStorage('ev4b', async ({ Storage, localStorage, evidenceKey }) => {
+    const key = evidenceKey('org-a');
+    const small = evidenceEpisode('a');
+    const huge = evidenceEpisode('h');
+    huge.folders[0].name = 'x'.repeat(Storage.MAX_FOLDER_EVIDENCE_CHARS + 1);
+
+    const nothingYet = Storage.preserveFolderGraphEvidence(huge.folders, huge.packs);
+    assert.deepEqual([nothingYet.ok, nothingYet.reason], [false, 'size'], 'a first copy over the size limit is refused');
+    assert.equal(localStorage.getItem(key), null);
+
+    Storage.preserveFolderGraphEvidence(small.folders, small.packs);
+    const kept = localStorage.getItem(key);
+    const tooBig = Storage.preserveFolderGraphEvidence(huge.folders, huge.packs);
+    assert.deepEqual([tooBig.ok, tooBig.reason], [false, 'size'], 'a later copy that would pass the size limit is refused');
+    assert.equal(localStorage.getItem(key), kept, 'the kept copies are untouched');
+
+    // Evidence that cannot be read is never replaced.
+    localStorage.setItem(key, '{not json');
+    const unreadable = Storage.preserveFolderGraphEvidence(small.folders, small.packs);
+    assert.deepEqual([unreadable.ok, unreadable.reason], [false, 'unreadable']);
+    assert.equal(localStorage.getItem(key), '{not json');
+  });
+});
+
+test('Stage 1 evidence: a copy is written only to the workspace it was made in', async () => {
+  await withEvidenceStorage('ev5', async ({ Storage, localStorage, evidenceKey }) => {
+    const [e1, e2] = ['a', 'b'].map(evidenceEpisode);
+    const inA = Storage.captureScopeContext();
+
+    Storage.setWorkspaceScope('org-b');
+    const stale = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs, inA);
+    assert.deepEqual([stale.ok, stale.reason], [false, 'scope-changed'], 'a copy made in workspace A is refused in workspace B');
+    assert.equal(localStorage.getItem(evidenceKey('org-a')), null);
+    assert.equal(localStorage.getItem(evidenceKey('org-b')), null, 'nothing is written into workspace B either');
+
+    assert.equal(Storage.preserveFolderGraphEvidence(e2.folders, e2.packs, Storage.captureScopeContext()).ok, true);
+    assert.equal(localStorage.getItem(evidenceKey('org-a')), null, 'workspace B evidence never lands in workspace A');
+    assert.deepEqual(JSON.parse(localStorage.getItem(evidenceKey('org-b'))).folderLibrary, e2.folders);
+
+    // A to B to A is a different identity from the first A, although the key is the same string.
+    Storage.setWorkspaceScope('org-a');
+    const stillStale = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs, inA);
+    assert.deepEqual([stillStale.ok, stillStale.reason], [false, 'scope-changed']);
+    assert.equal(localStorage.getItem(evidenceKey('org-a')), null);
+    assert.equal(Storage.preserveFolderGraphEvidence(e1.folders, e1.packs, Storage.captureScopeContext()).ok, true);
+    assert.deepEqual(JSON.parse(localStorage.getItem(evidenceKey('org-a'))).folderLibrary, e1.folders);
+    assert.deepEqual(JSON.parse(localStorage.getItem(evidenceKey('org-b'))).folderLibrary, e2.folders, 'B keeps only its own copy');
+  });
 });
 
 test('Stage 1 F-03 F-05 strict Workspace Backup parsing is unchanged: a real Folder id looks fine, a damaged graph is refused', async () => {

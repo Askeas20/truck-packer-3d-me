@@ -791,7 +791,7 @@ export function createPacksScreen({
     function beginFolderDialog() {
       const scope = captureScopeContext();
       const epoch = folderStateEpoch;
-      return { modal: null, isCurrent: () => isScopeContextCurrent(scope) && epoch === folderStateEpoch };
+      return { modal: null, scope, isCurrent: () => isScopeContextCurrent(scope) && epoch === folderStateEpoch };
     }
 
     function trackFolderDialog(guard, modal) {
@@ -1303,10 +1303,14 @@ export function createPacksScreen({
       if (mutationBlockedWhileBusy()) return;
       if (!folderDialogIsCurrent(guard)) return;
 
-      const kept = typeof preserveFolderEvidence === 'function' ? preserveFolderEvidence() : { ok: false };
+      const kept = typeof preserveFolderEvidence === 'function' ? preserveFolderEvidence(guard.scope) : { ok: false };
       if (!kept || kept.ok !== true) {
+        // Nothing has changed: the damaged data stays exactly as stored and the notice stays on screen.
+        const reason = kept && kept.reason;
         UIComponents.showToast(
-          'Could not keep a copy of the current Folder data, so nothing was repaired. Free up browser storage and try again.',
+          reason && reason !== 'storage'
+            ? `${kept.message} Nothing was repaired and your Folder data is unchanged.`
+            : 'Could not keep a copy of the current Folder data, so nothing was repaired. Free up browser storage and try again.',
           'error',
           { title: 'Folders' }
         );

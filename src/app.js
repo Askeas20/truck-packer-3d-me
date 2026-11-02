@@ -2523,9 +2523,10 @@ const TP3D_BUILD_STAMP = Object.freeze({
         Storage.cancelPendingSave();
         return Storage.saveNow({ report: false });
       },
-      // The original of a damaged Folder graph, kept before the explicit repair may change it.
-      preserveFolderEvidence: () =>
-        Storage.preserveFolderGraphEvidence(StateStore.get('folderLibrary'), StateStore.get('packLibrary')),
+      // A copy of a damaged Folder graph, kept before the explicit repair may change it. It is written only while
+      // the user and workspace the repair dialog was opened in are still the active ones.
+      preserveFolderEvidence: scope =>
+        Storage.preserveFolderGraphEvidence(StateStore.get('folderLibrary'), StateStore.get('packLibrary'), scope),
       toast,
       toAscii,
     });

@@ -2276,6 +2276,25 @@ test('Folder Stage 1 F-03: damaged Folder data stays as stored, no plan is invis
   assert.deepEqual(mid.folders.map(f => f[1]), ['Good Folder', 'Dup First', 'Dup Second']);
   assert.equal(mid.packs.find(p => p[0] === 'p-dup')[1], 'f-dup', 'the other plan keeps its stored reference');
 
+  // A copy that the browser refuses to keep stops the repair: the damaged graph and the kept evidence stay as they are.
+  const evidenceKey = `${folderWorkspaceKey(ORG_A)}:folder-graph-evidence`;
+  const evidenceBefore = await page.evaluate(key => localStorage.getItem(key), evidenceKey);
+  const graphBefore = await folderSnapshot(page);
+  await page.evaluate(key => {
+    window.__tp3dRealSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (name, value) {
+      if (name === key) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      return window.__tp3dRealSetItem.call(this, name, value);
+    };
+  }, evidenceKey);
+  await page.locator('#packs-folder-notice-repair').click();
+  await page.getByRole('button', { name: 'Repair', exact: true }).click();
+  await page.locator('.toast', { hasText: 'nothing was repaired' }).first().waitFor({ state: 'visible' });
+  assert.equal(await folderSnapshot(page), graphBefore, 'a refused copy leaves the damaged graph exactly as it was');
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), evidenceKey), evidenceBefore, 'the kept evidence is unchanged');
+  await notice.waitFor({ state: 'visible' });
+  await page.evaluate(() => { Storage.prototype.setItem = window.__tp3dRealSetItem; });
+
   // Explicit repair: confirmed, original kept, nothing lost.
   await page.locator('#packs-folder-notice-repair').click();
   const dialog = page.locator('#modal-root .modal-overlay:not([data-auth-overlay])');
@@ -2292,9 +2311,10 @@ test('Folder Stage 1 F-03: damaged Folder data stays as stored, no plan is invis
   assert.deepEqual(await shownPlans(page, titles), titles);
   const evidenceStill = await page.evaluate(key => {
     const kept = JSON.parse(localStorage.getItem(key));
-    return [kept.folderLibrary.length, kept.packFolderRefs.find(r => r.id === 'p-dup').folderId];
-  }, `${folderWorkspaceKey(ORG_A)}:folder-graph-evidence`);
-  assert.deepEqual(evidenceStill, [3, 'f-dup'], 'the original copy, including the shared-id reference, is still there after the repair');
+    return [kept.folderLibrary.length, kept.packFolderRefs.find(r => r.id === 'p-dup').folderId, (kept.laterRecords || []).length];
+  }, evidenceKey);
+  assert.deepEqual(evidenceStill, [3, 'f-dup', 1],
+    'the original copy, including the shared-id reference, is still there, with the state just before the repair kept beside it');
   assert.deepEqual(scenario.diagnostics.pageErrors, []);
 });
 
