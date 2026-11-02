@@ -117,6 +117,11 @@ export function createPacksScreen({
       { key: 'edited', label: 'Edited' },
     ];
     let activeFolderId = null;
+    // Folder dialog scope binding (see beginFolderDialog): open dialogs, the in-place state-replacement epoch,
+    // and the guard of the open Folders menu.
+    const folderDialogs = new Set();
+    let folderStateEpoch = 0;
+    let foldersDropdownGuard = null;
     let datasetKey = '';
     let sortKey = 'edited-desc';
     // Canonical Load Plans view-mode value. Set once from the persisted
@@ -563,6 +568,11 @@ export function createPacksScreen({
       wireChip(chipFull, 'full');
       btnNew.addEventListener('click', () => openNewPackModal());
       ensureFoldersButton();
+      StateStore.subscribe(changes => {
+        // A whole-state replacement (workspace switch, sign-out, restore) invalidates every open Folder dialog.
+        if (changes && changes._replace) folderStateEpoch += 1;
+        dismissFolderDialogs();
+      });
       btnViewGrid.addEventListener('click', () => setViewMode('grid'));
       btnViewList.addEventListener('click', () => setViewMode('list'));
       btnSort &&
@@ -740,6 +750,54 @@ export function createPacksScreen({
       }
     }
 
+    // A Folder dialog (or the Folders menu) acts only on the user and workspace it was opened in. Its guard
+    // holds the storage scope context (user, workspace and a generation that never repeats, so A -> B -> A is a
+    // different identity) plus an epoch that moves when the whole state is replaced in place (restore/import).
+    // The guard is checked again right before every write; open dialogs are also closed when it goes stale.
+    function beginFolderDialog() {
+      const scope = captureScopeContext();
+      const epoch = folderStateEpoch;
+      return { modal: null, isCurrent: () => isScopeContextCurrent(scope) && epoch === folderStateEpoch };
+    }
+
+    function trackFolderDialog(guard, modal) {
+      guard.modal = modal;
+      folderDialogs.add(guard);
+      return modal;
+    }
+
+    function releaseFolderDialog(guard) {
+      folderDialogs.delete(guard);
+    }
+
+    function folderDialogIsCurrent(guard) {
+      if (guard.isCurrent()) return true;
+      releaseFolderDialog(guard);
+      UIComponents.showToast('The workspace changed. Nothing was saved.', 'warning', { title: 'Folders' });
+      return false;
+    }
+
+    function closeFolderDialog(guard) {
+      releaseFolderDialog(guard);
+      try {
+        // No focus restore: the workspace around the dialog just changed, and an auth or switch overlay may own focus.
+        if (guard.modal) guard.modal.close({ restoreFocus: false });
+      } catch (_err) {
+        // Already closed.
+      }
+    }
+
+    function dismissFolderDialogs({ all = false } = {}) {
+      Array.from(folderDialogs).forEach(guard => {
+        if (all || !guard.isCurrent()) closeFolderDialog(guard);
+      });
+      if (foldersDropdownGuard && (all || !foldersDropdownGuard.isCurrent())) {
+        foldersDropdownGuard = null;
+        UIComponents.closeAllDropdowns();
+        setFoldersButtonExpanded(false);
+      }
+    }
+
     function getFolderFilterModel(allPacks) {
       const packs = Array.isArray(allPacks) ? allPacks : [];
       const folders = getSafeFolders();
@@ -876,9 +934,11 @@ export function createPacksScreen({
       name.wrap.classList.add('tp3d-grid-span-full');
       content.appendChild(name.wrap);
 
-      UIComponents.showModal({
+      const guard = beginFolderDialog();
+      trackFolderDialog(guard, UIComponents.showModal({
         title: 'New Folder',
         content,
+        onClose: () => releaseFolderDialog(guard),
         actions: [
           { label: 'Cancel' },
           {
@@ -886,6 +946,7 @@ export function createPacksScreen({
             variant: 'primary',
             onClick: () => {
               if (mutationBlockedWhileBusy()) return false;
+              if (!folderDialogIsCurrent(guard)) return true;
               const folderName = String(name.input.value || '').trim();
               const created = FolderLibrary.createFolder(folderName);
               persistFolderStateNow();
@@ -899,7 +960,7 @@ export function createPacksScreen({
             },
           },
         ],
-      });
+      }));
     }
 
     function openRenameFolderModal(folder) {
@@ -913,9 +974,11 @@ export function createPacksScreen({
       name.wrap.classList.add('tp3d-grid-span-full');
       content.appendChild(name.wrap);
 
-      UIComponents.showModal({
+      const guard = beginFolderDialog();
+      trackFolderDialog(guard, UIComponents.showModal({
         title: 'Rename Folder',
         content,
+        onClose: () => releaseFolderDialog(guard),
         actions: [
           { label: 'Cancel' },
           {
@@ -923,6 +986,7 @@ export function createPacksScreen({
             variant: 'primary',
             onClick: () => {
               if (mutationBlockedWhileBusy()) return false;
+              if (!folderDialogIsCurrent(guard)) return true;
               const renamed = FolderLibrary.renameFolder(folderId, name.input.value);
               if (!renamed) {
                 UIComponents.showToast('Could not rename folder', 'warning');
@@ -935,23 +999,36 @@ export function createPacksScreen({
             },
           },
         ],
-      });
+      }));
     }
 
     async function deleteFolderWithConfirm(folder) {
       if (!folder || !folder.id) return;
       if (mutationBlockedWhileBusy()) return;
+      const guard = beginFolderDialog();
       const folderId = String(folder.id);
       const folderName = folder.name || 'Untitled Folder';
       const affectedCount = PackLibrary.getPacks().filter(pack => pack && String(pack.folderId || '') === folderId).length;
-      const ok = await UIComponents.confirm({
-        title: 'Delete folder?',
-        message: `Delete "${folderName}"? ${affectedCount} load plan(s) in this folder will move to Unfiled. Load plans will not be deleted.`,
-        danger: true,
-        okLabel: 'Delete',
-      });
+      // The modal API treats a string message as trusted HTML and a Folder name is user text, so the message is
+      // an element filled through textContent (the same rule the Annotation discard dialog follows).
+      const message = document.createElement('div');
+      message.textContent =
+        `Delete "${folderName}"? ${affectedCount} load plan(s) in this folder will move to Unfiled. Load plans will not be deleted.`;
+      let ok;
+      try {
+        ok = await UIComponents.confirm({
+          title: 'Delete folder?',
+          message,
+          danger: true,
+          okLabel: 'Delete',
+          onOpen: modal => trackFolderDialog(guard, modal),
+        });
+      } finally {
+        releaseFolderDialog(guard);
+      }
       if (!ok) return;
       if (mutationBlockedWhileBusy()) return;
+      if (!folderDialogIsCurrent(guard)) return;
 
       const deleted = FolderLibrary.deleteFolder(folderId);
       if (!deleted) {
@@ -989,6 +1066,7 @@ export function createPacksScreen({
       const content = document.createElement('div');
       content.classList.add('tp3d-packs-modal-grid');
       let modalRef = null;
+      const guard = beginFolderDialog();
 
       const addMoveRow = (label, iconClass, folderIdOrNull, disabled = false) => {
         const button = document.createElement('button');
@@ -1012,6 +1090,10 @@ export function createPacksScreen({
         }
         button.addEventListener('click', () => {
           if (disabled) return;
+          if (!folderDialogIsCurrent(guard)) {
+            closeFolderDialog(guard);
+            return;
+          }
           const moved = movePackToFolder(pack, folderIdOrNull);
           if (moved && modalRef && typeof modalRef.close === 'function') modalRef.close();
         });
@@ -1035,10 +1117,12 @@ export function createPacksScreen({
       modalRef = UIComponents.showModal({
         title: 'Move to Folder',
         content,
+        onClose: () => releaseFolderDialog(guard),
         actions: [
           { label: 'Close' },
         ],
       });
+      trackFolderDialog(guard, modalRef);
     }
 
     function openFoldersDropdown() {
@@ -1126,6 +1210,21 @@ export function createPacksScreen({
           },
         }
       );
+
+      // Every action in this menu is bound to the user/workspace it was opened in.
+      const guard = beginFolderDialog();
+      foldersDropdownGuard = guard;
+      items.forEach(item => {
+        if (typeof item.onClick !== 'function') return;
+        const action = item.onClick;
+        item.onClick = (...args) => {
+          if (!guard.isCurrent()) {
+            dismissFolderDialogs();
+            return undefined;
+          }
+          return action(...args);
+        };
+      });
 
       setFoldersButtonExpanded(true);
       UIComponents.openDropdown(button, items, {
@@ -1626,6 +1725,7 @@ export function createPacksScreen({
     }
 
     function resetWorkspaceState() {
+      dismissFolderDialogs({ all: true });
       selectedIds.clear();
       filteredPacks = [];
       activeFolderId = null;

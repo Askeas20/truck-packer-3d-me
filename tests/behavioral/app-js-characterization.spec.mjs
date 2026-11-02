@@ -1969,3 +1969,202 @@ test('C4 saved invalid pose survives open, read-only Check and referenced Case e
   assert.deepEqual(scenario.diagnostics.pageErrors, []);
   await page.screenshot({ path: '/tmp/c4-editor-preserved-pose.png' });
 });
+
+// ── Folder Foundation Stage 1: Folder dialogs in the real app ───────────────────────────────
+// Real clicks and typing drive the dialogs. The one stale-handler probe below calls a held button's
+// click() directly and says so: it proves the write-time re-validation, not user behaviour.
+const HOSTILE_FOLDER_NAME = '<img src=x onerror="window.__tp3dFolderXss=1"><b>bold</b> &amp; <script>window.__tp3dFolderXss=2</script>';
+const folderWorkspaceKey = orgId => `truckPacker3d:v1:user-a:workspace:${orgId}`;
+
+function folderWorkspacePayload({ folders = [], packs = [] }) {
+  return {
+    version: 'folder-stage1',
+    savedAt: 1,
+    caseLibrary: [],
+    packLibrary: packs.map(pack => ({
+      truck: { length: 100, width: 80, height: 80, shapeMode: 'rect' },
+      cases: [], groups: [], createdAt: 1, lastEdited: 2, folderId: null, ...pack,
+    })),
+    folderLibrary: folders.map(folder => ({
+      scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1, ...folder,
+    })),
+    currentPackId: null,
+  };
+}
+
+async function seedFolderWorkspaces(scenario, entries) {
+  // The same npm Three.js import map the C3 fixture uses, then first-write-only localStorage seeds.
+  await scenario.context.route('**/index.html', async route => {
+    const response = await route.fetch();
+    const imports = { three: '/node_modules/three/build/three.module.js',
+      'three/addons/': '/node_modules/three/examples/jsm/' };
+    const body = (await response.text()).replace('<head>',
+      `<head><script type="importmap">${JSON.stringify({ imports })}</script>`);
+    await route.fulfill({ response, body });
+  });
+  await scenario.context.addInitScript(values => {
+    for (const [key, data] of values) {
+      if (localStorage.getItem(key) === null) localStorage.setItem(key, JSON.stringify(data));
+    }
+  }, entries);
+}
+
+async function openFolderLibrary(scenario, page) {
+  await scenario.waitForAppReady(page);
+  await waitForSignedInOwner(page, 'user-a', ORG_A);
+  await page.locator('.tp3d-packs-folder-btn').waitFor({ state: 'visible' });
+}
+
+async function openFoldersMenu(page) {
+  await page.locator('.tp3d-packs-folder-btn').click();
+  const menu = page.locator('[data-dropdown="1"][data-role="packs-folders"]');
+  await menu.waitFor({ state: 'visible' });
+  return menu;
+}
+
+async function chooseFolderFilter(page, label) {
+  const menu = await openFoldersMenu(page);
+  await menu.getByRole('menuitem').filter({ hasText: label }).first().click();
+}
+
+async function chooseFolderAction(page, action) {
+  const menu = await openFoldersMenu(page);
+  await menu.getByRole('menuitem', { name: action }).click();
+}
+
+async function folderSnapshot(page) {
+  return page.evaluate(async () => {
+    const StateStore = await import('/src/core/state-store.js');
+    return JSON.stringify({
+      folders: (StateStore.get('folderLibrary') || []).map(f => [f.id, f.name, f.updatedAt]),
+      packs: (StateStore.get('packLibrary') || []).map(p => [p.id, p.folderId, p.lastEdited]),
+      undoDepth: StateStore.undoDepth(),
+    });
+  });
+}
+
+test('Folder Stage 1 F-01: a hostile Folder name is literal text in every Folder menu and dialog', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), folderWorkspacePayload({
+    folders: [{ id: 'f-hostile', name: HOSTILE_FOLDER_NAME }],
+    packs: [{ id: 'p1', title: 'Plan One', loadPlanNumber: 'LP-00000001', folderId: 'f-hostile' }],
+  })]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+
+  // Stored data: the Folders menu row and the button label, then the Delete confirmation.
+  await chooseFolderFilter(page, 'tp3dFolderXss');
+  assert.equal(await page.locator('.tp3d-packs-folder-btn__label').textContent(), HOSTILE_FOLDER_NAME);
+  await chooseFolderAction(page, 'Delete Folder');
+  const confirmBody = page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) .modal-body');
+  await confirmBody.waitFor({ state: 'visible' });
+  assert.ok((await confirmBody.textContent()).includes(`Delete "${HOSTILE_FOLDER_NAME}"?`),
+    'the confirmation shows the name literally');
+  assert.equal(await page.locator('#modal-root img, #modal-root b, #modal-root script').count(), 0,
+    'no element was created from the name');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay])').waitFor({ state: 'detached' });
+
+  // Rename dialog and Move dialog.
+  await chooseFolderAction(page, 'Rename Folder');
+  assert.equal(await page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').inputValue(), HOSTILE_FOLDER_NAME);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay])').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'More actions for Plan One', exact: true }).click();
+  await page.locator('.dropdown-item', { hasText: 'Move to Folder' }).click();
+  await page.locator('#modal-root .tp3d-packs-folder-option-btn').first().waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#modal-root img, #modal-root b, #modal-root script').count(), 0);
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay])').waitFor({ state: 'detached' });
+
+  // Created through the UI with real typing: same literal rendering, then delete it.
+  await chooseFolderAction(page, 'New Folder');
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').fill(HOSTILE_FOLDER_NAME.replace('tp3dFolderXss=1', 'tp3dFolderXss=3').slice(0, 90));
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await chooseFolderAction(page, 'Delete Folder');
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) .modal-body').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#modal-root img, #modal-root b, #modal-root script').count(), 0);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  assert.equal(await page.evaluate(() => window.__tp3dFolderXss), undefined, 'no handler or script ran');
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+test('Folder Stage 1 F-02: open Folder dialogs cannot act after A to B and A to B to A with overlapping ids', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  const workspace = name => folderWorkspacePayload({
+    folders: [{ id: 'f1', name: `${name} One`, sortOrder: 0 }, { id: 'f2', name: `${name} Two`, sortOrder: 100 }],
+    packs: [
+      { id: 'p1', title: `${name} Plan 1`, loadPlanNumber: 'LP-00000001', folderId: 'f1' },
+      { id: 'p2', title: `${name} Plan 2`, loadPlanNumber: 'LP-00000002', folderId: null },
+    ],
+  });
+  await seedFolderWorkspaces(scenario, [
+    [folderWorkspaceKey(ORG_A), workspace('Alpha')],
+    [folderWorkspaceKey(ORG_B), workspace('Beta')],
+  ]);
+  const receiver = await scenario.openPage();
+  const sender = await scenario.openPage();
+  await Promise.all([openFolderLibrary(scenario, receiver), openFolderLibrary(scenario, sender)]);
+
+  const holdPrimaryAction = (page, selector) => page.evaluate(sel => {
+    window.__tp3dHeldFolderAction = document.querySelector(sel);
+    return Boolean(window.__tp3dHeldFolderAction);
+  }, selector);
+  const dialogs = {
+    async create() {
+      await chooseFolderAction(receiver, 'New Folder');
+      await receiver.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').fill('Injected By Stale Dialog');
+      return holdPrimaryAction(receiver, '#modal-root .modal-overlay:not([data-auth-overlay]) .modal-footer button.btn-primary');
+    },
+    async rename() {
+      await chooseFolderFilter(receiver, 'Alpha One');
+      await chooseFolderAction(receiver, 'Rename Folder');
+      await receiver.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').fill('Renamed By Stale Dialog');
+      return holdPrimaryAction(receiver, '#modal-root .modal-overlay:not([data-auth-overlay]) .modal-footer button.btn-primary');
+    },
+    async delete() {
+      await chooseFolderFilter(receiver, 'Alpha One');
+      await chooseFolderAction(receiver, 'Delete Folder');
+      await receiver.locator('#modal-root .modal-overlay:not([data-auth-overlay]) .modal-footer button.btn-danger').waitFor({ state: 'visible' });
+      return holdPrimaryAction(receiver, '#modal-root .modal-overlay:not([data-auth-overlay]) .modal-footer button.btn-danger');
+    },
+    async move() {
+      await receiver.getByRole('button', { name: 'More actions for Alpha Plan 2', exact: true }).click();
+      await receiver.locator('.dropdown-item', { hasText: 'Move to Folder' }).click();
+      await receiver.locator('#modal-root .tp3d-packs-folder-option-btn').first().waitFor({ state: 'visible' });
+      return holdPrimaryAction(receiver,
+        '#modal-root .tp3d-packs-folder-option-btn:has(.tp3d-packs-folder-option-btn__label)'
+        + ':nth-of-type(3)');
+    },
+  };
+  const switchBoth = async (orgId, name) => {
+    await armWorkspaceReady(receiver, orgId);
+    await switchWorkspaceAndWait(sender, orgId, name);
+    await readArmedWorkspaceReady(receiver);
+    await receiver.locator('.tp3d-packs-folder-btn').waitFor({ state: 'visible' });
+  };
+
+  for (const kind of ['create', 'rename', 'delete', 'move']) {
+    assert.equal(await dialogs[kind](), true, `${kind}: the dialog's action button was held`);
+
+    await switchBoth(ORG_B, 'Workspace B');
+    assert.equal(await receiver.locator('#modal-root .modal-overlay:not([data-auth-overlay])').count(), 0,
+      `${kind}: the dialog is dismissed when the workspace changes`);
+    const inB = await folderSnapshot(receiver);
+    // Stale-handler probe (direct click): the dialog is gone, but its handler must still refuse to write.
+    await receiver.evaluate(() => window.__tp3dHeldFolderAction.click());
+    await receiver.locator('.toast', { hasText: 'workspace changed' }).first().waitFor({ state: 'visible' });
+    assert.equal(await folderSnapshot(receiver), inB, `${kind}: A to B leaves workspace B untouched`);
+
+    await switchBoth(ORG_A, 'Workspace A');
+    const inA = await folderSnapshot(receiver);
+    await receiver.evaluate(() => window.__tp3dHeldFolderAction.click());
+    assert.equal(await folderSnapshot(receiver), inA,
+      `${kind}: A to B to A does not make the old dialog valid again`);
+    assert.match(inA, /Alpha One/);
+  }
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});

@@ -1267,3 +1267,55 @@ test('phase 0.7C-4B rename delete stay guarded to active real folders only', asy
   assert.match(actionsBlock, /deleteFolderWithConfirm\(model\.activeFolder\)/,
     'Delete Folder action must target the active real folder');
 });
+
+// ── Folder Foundation Stage 1 ───────────────────────────────────────────────────────────────
+const uiComponentsPath = new URL('../../src/ui/ui-components.js', import.meta.url);
+
+function functionBlock(src, header, nextHeader) {
+  const start = src.indexOf(header);
+  const end = src.indexOf(nextHeader, start + header.length);
+  return start >= 0 && end > start ? src.slice(start, end) : '';
+}
+
+test('Stage 1 F-01 the delete confirmation shows the Folder name through textContent, not an HTML string', async () => {
+  const packsSrc = await fs.readFile(packsScreenPath, 'utf8');
+  const uiSrc = await fs.readFile(uiComponentsPath, 'utf8');
+  const block = functionBlock(packsSrc, 'async function deleteFolderWithConfirm(folder)', '\n    function movePackToFolder(');
+
+  assert.ok(block.length > 0, 'the delete confirmation must stay discoverable');
+  assert.match(block, /const message = document\.createElement\('div'\);\s*message\.textContent =/,
+    'the message must be an element filled through textContent');
+  assert.match(block, /UIComponents\.confirm\(\{[\s\S]*?\n\s+message,\n/,
+    'confirm must receive the element, not a template string');
+  assert.doesNotMatch(block, /message:\s*`/,
+    'a Folder name must never be interpolated into a string message (the modal treats strings as HTML)');
+  assert.match(uiSrc, /SECURITY: Treat string content as trusted HTML only/,
+    'the shared modal string contract stays unchanged for its trusted-markup callers');
+});
+
+test('Stage 1 F-02 every Folder dialog binds to its scope and re-checks it before it writes', async () => {
+  const src = await fs.readFile(packsScreenPath, 'utf8');
+  const cases = [
+    ['create', 'function openCreateFolderModal()', 'FolderLibrary.createFolder('],
+    ['rename', 'function openRenameFolderModal(folder)', 'FolderLibrary.renameFolder('],
+    ['delete', 'async function deleteFolderWithConfirm(folder)', 'FolderLibrary.deleteFolder('],
+    ['move', 'function openMoveToFolderModal(pack)', 'movePackToFolder(pack, folderIdOrNull)'],
+  ];
+  cases.forEach(([name, header, write]) => {
+    const start = src.indexOf(header);
+    const body = src.slice(start, src.indexOf('\n    function ', start + header.length) > 0
+      ? src.indexOf('\n    function ', start + header.length) : undefined);
+    assert.ok(start >= 0, `${name} dialog must exist`);
+    assert.match(body, /beginFolderDialog\(\)/, `${name} dialog must capture its scope when it opens`);
+    const guardAt = body.search(/folderDialogIsCurrent\(guard\)/);
+    const writeAt = body.indexOf(write);
+    assert.ok(guardAt >= 0 && writeAt >= 0 && guardAt < writeAt,
+      `${name} dialog must re-validate its scope before it writes`);
+  });
+  assert.match(src, /isCurrent: \(\) => isScopeContextCurrent\(scope\) && epoch === folderStateEpoch/,
+    'the guard uses the storage scope generation, so A to B to A is a different identity');
+  assert.match(src, /if \(changes && changes\._replace\) folderStateEpoch \+= 1;\s*dismissFolderDialogs\(\);/,
+    'a whole-state replacement invalidates and dismisses open dialogs');
+  assert.match(src, /function resetWorkspaceState\(\) \{\s*dismissFolderDialogs\(\{ all: true \}\);/,
+    'a workspace reset dismisses every open Folder dialog');
+});
