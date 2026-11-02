@@ -2517,7 +2517,15 @@ const TP3D_BUILD_STAMP = Object.freeze({
       TruckChangeController,
       OperationLifecycle,
       featureFlags,
-      persistNow: () => Storage.saveNow(),
+      // An immediate save that reports its own outcome: the caller shows the one success or failure message, and the
+      // queued autosave is dropped because this write carries the same whole state.
+      persistNow: () => {
+        Storage.cancelPendingSave();
+        return Storage.saveNow({ report: false });
+      },
+      // The original of a damaged Folder graph, kept before the explicit repair may change it.
+      preserveFolderEvidence: () =>
+        Storage.preserveFolderGraphEvidence(StateStore.get('folderLibrary'), StateStore.get('packLibrary')),
       toast,
       toAscii,
     });

@@ -17,6 +17,7 @@ import * as Defaults from './defaults.js';
 import { debounce } from './browser.js';
 import * as StateStore from './state-store.js';
 import {
+  inspectFolderGraph,
   normalizeAppData,
   sanitizeLegacyPackQuantityLibrary,
   stripInternalTruckFields,
@@ -48,6 +49,7 @@ export const APP_RESTORE_RECOVERY_REQUIRED = 'APP_RESTORE_RECOVERY_REQUIRED';
 
 const APP_RESTORE_RECOVERY_VERSION = 1;
 const APP_RESTORE_RECOVERY_SUFFIX = ':app-restore-recovery';
+const FOLDER_GRAPH_EVIDENCE_SUFFIX = ':folder-graph-evidence';
 
 // Storage is scoped first by user, then by active workspace. Preferences stay
 // user-scoped while packs/cases/currentPackId live under the active workspace.
@@ -126,6 +128,34 @@ function getWorkspaceScopedKey() {
 
 function getAppRestoreRecoveryKey(workspaceKey) {
   return `${workspaceKey}${APP_RESTORE_RECOVERY_SUFFIX}`;
+}
+
+/**
+ * Keep the original of a damaged Folder graph (the Folder records as stored plus every Load Plan folderId)
+ * before anything may repair it. The first copy is the one that matters, so an existing record is never
+ * overwritten. Returns `{ ok, existing? }`; the write is read back before it is called kept.
+ * @param {unknown} folderLibrary
+ * @param {unknown} packLibrary
+ */
+export function preserveFolderGraphEvidence(folderLibrary, packLibrary) {
+  try {
+    const key = `${getWorkspaceScopedKey()}${FOLDER_GRAPH_EVIDENCE_SUFFIX}`;
+    if (window.localStorage.getItem(key) != null) return { ok: true, existing: true };
+    const packs = Array.isArray(packLibrary) ? packLibrary : [];
+    const raw = JSON.stringify({
+      kind: 'folder-graph-evidence',
+      version: 1,
+      capturedAt: Date.now(),
+      folderLibrary: Array.isArray(folderLibrary) ? folderLibrary : [],
+      packFolderRefs: packs
+        .filter(pack => pack && typeof pack === 'object' && pack.folderId != null)
+        .map(pack => ({ id: pack.id, folderId: pack.folderId })),
+    });
+    window.localStorage.setItem(key, raw);
+    return { ok: window.localStorage.getItem(key) === raw };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 function fingerprintRaw(raw) {
@@ -487,6 +517,22 @@ export function load() {
 
     if (!preferences && !hasEffectiveWorkspaceData) return null;
 
+    const loadedFolderLibrary =
+      hasEffectiveWorkspaceData && Array.isArray(effectiveWorkspacePayload.folderLibrary)
+        ? effectiveWorkspacePayload.folderLibrary
+        : [];
+    // A damaged Folder graph is loaded as it is (nothing is repaired or dropped here); its original is kept once.
+    if (!inspectFolderGraph(loadedFolderLibrary, identityLibraries.packLibrary).clean) {
+      const kept = preserveFolderGraphEvidence(loadedFolderLibrary, identityLibraries.packLibrary);
+      if (!kept.ok) {
+        emit('storage:write_error', {
+          key: workspaceKey,
+          message: 'Could not keep a copy of the damaged Folder data',
+          error: kept.error,
+        });
+      }
+    }
+
     return {
       version:
         (effectiveWorkspacePayload && effectiveWorkspacePayload.version) ||
@@ -499,10 +545,7 @@ export function load() {
       preferences,
       caseLibrary: identityLibraries.caseLibrary,
       packLibrary: identityLibraries.packLibrary,
-      folderLibrary:
-        hasEffectiveWorkspaceData && Array.isArray(effectiveWorkspacePayload.folderLibrary)
-          ? effectiveWorkspacePayload.folderLibrary
-          : [],
+      folderLibrary: loadedFolderLibrary,
       currentPackId: hasEffectiveWorkspaceData ? effectiveWorkspacePayload.currentPackId || null : null,
     };
   } catch (err) {
@@ -789,20 +832,22 @@ export function rollbackAppRestore(receipt) {
   return rollbackRestoreRecord(receipt.recoveryRecord, receipt.recoveryKey, receipt.recoveryRaw);
 }
 
-export function saveNow() {
+/**
+ * Write the current state to localStorage now. Resolves to `{ ok: true, savedAt }` once both payloads were
+ * accepted, or `{ ok: false, message, error, blocked? }` when they were not. A failure is announced through
+ * `storage:save_error` unless the caller passes `{ report: false }` because it shows the one message itself.
+ */
+export function saveNow(options) {
+  const report = !(options && options.report === false);
   const scopedKey = getScopedKey();
   const workspaceKey = getWorkspaceScopedKey();
+  const fail = (error, message, extra) => {
+    if (report) emit('storage:save_error', { key: workspaceKey, message, error, ...extra });
+    return { ok: false, message, error, ...extra };
+  };
   try {
     const blocked = getAppRestoreSaveBlock(scopedKey, workspaceKey);
-    if (blocked) {
-      emit('storage:save_error', {
-        key: workspaceKey,
-        message: blocked.message,
-        error: blocked,
-        blocked: true,
-      });
-      return;
-    }
+    if (blocked) return fail(blocked, blocked.message, { blocked: true });
     const state = StateStore.get();
     const sanitizedPacks = sanitizeLegacyPackQuantityLibrary(state.packLibrary).packLibrary;
     const userPayload = {
@@ -824,12 +869,9 @@ export function saveNow() {
     }
     window.localStorage.setItem(workspaceKey, JSON.stringify(workspacePayload));
     emit('storage:saved', { key: workspaceKey, savedAt: workspacePayload.savedAt });
+    return { ok: true, savedAt: workspacePayload.savedAt };
   } catch (err) {
-    emit('storage:save_error', {
-      key: workspaceKey,
-      message: err && err.message ? err.message : 'Save failed',
-      error: err,
-    });
+    return fail(err, err && err.message ? err.message : 'Save failed');
   }
 }
 

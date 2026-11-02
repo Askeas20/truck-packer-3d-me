@@ -9,6 +9,7 @@
 
 import * as StateStore from '../core/state-store.js';
 import * as Utils from '../core/utils/index.js';
+import { inspectFolderGraph, repairFolderGraph as repairGraph } from '../core/normalizer.js';
 
 function cleanName(name) {
   return String(name || '').trim() || 'Untitled Folder';
@@ -26,13 +27,34 @@ function nextSortOrder(folders) {
   return (folders || []).reduce((max, folder) => Math.max(max, Number(folder && folder.sortOrder) || 0), -100) + 100;
 }
 
+// Only Folders with a unique, valid id are acted on: a damaged or repeated id could point at the wrong record.
+function usableFolders() {
+  return inspectFolderGraph(getFolders(), getPacks()).folders;
+}
+
 function folderExists(folderId) {
   if (folderId == null) return true;
-  return getFolders().some(folder => folder && folder.id === folderId);
+  return usableFolders().some(folder => folder.id === folderId);
+}
+
+/** The Folder graph as stored: usable Folders, damaged records and Load Plans whose Folder cannot be found. */
+export function getFolderGraph() {
+  return inspectFolderGraph(getFolders(), getPacks());
+}
+
+/**
+ * The explicit recovery for a damaged Folder graph, one history step. The caller must have preserved the
+ * original first. Returns null when there is nothing to repair.
+ */
+export function repairFolderGraph() {
+  if (getFolderGraph().clean) return null;
+  const repaired = repairGraph(getFolders(), getPacks());
+  StateStore.set({ folderLibrary: repaired.folderLibrary, packLibrary: repaired.packLibrary });
+  return repaired;
 }
 
 export function listFolders() {
-  return [...getFolders()].sort((a, b) => {
+  return [...usableFolders()].sort((a, b) => {
     const aOrder = Number(a && a.sortOrder) || 0;
     const bOrder = Number(b && b.sortOrder) || 0;
     if (aOrder !== bOrder) return aOrder - bOrder;
@@ -58,6 +80,7 @@ export function createFolder(name) {
 
 export function renameFolder(folderId, name) {
   const folders = getFolders();
+  if (!folderExists(folderId)) return null;
   const idx = folders.findIndex(folder => folder && folder.id === folderId);
   if (idx === -1) return null;
   const now = Date.now();
@@ -72,7 +95,7 @@ export function renameFolder(folderId, name) {
 
 export function deleteFolder(folderId) {
   const folders = getFolders();
-  const existing = folders.find(folder => folder && folder.id === folderId);
+  const existing = usableFolders().find(folder => folder.id === folderId);
   if (!existing) return false;
 
   const nextFolders = folders.filter(folder => folder && folder.id !== folderId);

@@ -69,6 +69,7 @@ export function createPacksScreen({
   OperationLifecycle,
   featureFlags,
   persistNow,
+  preserveFolderEvidence,
   toast,
   toAscii: _toAscii,
 }) {
@@ -81,6 +82,10 @@ export function createPacksScreen({
     const emptyEl = /** @type {HTMLElement} */ (document.getElementById('packs-empty'));
     const filterEmptyEl = /** @type {HTMLElement} */ (document.getElementById('packs-filter-empty'));
     const filterEmptyMsg = /** @type {HTMLElement} */ (document.getElementById('packs-filter-empty-msg'));
+    const folderNoticeEl = document.getElementById('packs-folder-notice');
+    const folderNoticeMsgEl = document.getElementById('packs-folder-notice-msg');
+    const folderNoticeShowEl = document.getElementById('packs-folder-notice-show');
+    const folderNoticeRepairEl = document.getElementById('packs-folder-notice-repair');
     const btnNew = document.getElementById('btn-new-pack');
     const chipAll = document.getElementById('packs-filter-chip-all');
     const chipEmpty = document.getElementById('packs-filter-chip-empty');
@@ -99,7 +104,11 @@ export function createPacksScreen({
     const btnBulkDelete = document.getElementById('btn-packs-bulk-delete');
     const btnBulkExport = document.getElementById('btn-packs-bulk-export');
 
-    const UNFILED_FOLDER_ID = '__unfiled__';
+    // Special (non-Folder) filters. They live beside activeFolderId, never inside it, so a real Folder can carry
+    // any id (a Workspace Backup may legally hold one that looks like a token).
+    const FILTER_UNFILED = 'unfiled';
+    // Load Plans whose folderId matches no usable Folder: listed here so none of them is ever invisible.
+    const FILTER_UNRESOLVED = 'unresolved';
     const FOLDERS_DROPDOWN_ROLE = 'packs-folders';
     const FOLDERS_DROPDOWN_ANCHOR_KEY = 'packs-folders-button';
     const filters = { empty: false, partial: false, full: false };
@@ -117,6 +126,7 @@ export function createPacksScreen({
       { key: 'edited', label: 'Edited' },
     ];
     let activeFolderId = null;
+    let activeSpecialFilter = null;
     // Folder dialog scope binding (see beginFolderDialog): open dialogs, the in-place state-replacement epoch,
     // and the guard of the open Folders menu.
     const folderDialogs = new Set();
@@ -568,6 +578,10 @@ export function createPacksScreen({
       wireChip(chipFull, 'full');
       btnNew.addEventListener('click', () => openNewPackModal());
       ensureFoldersButton();
+      if (folderNoticeShowEl) {
+        folderNoticeShowEl.addEventListener('click', () => selectFolderFilter({ special: FILTER_UNRESOLVED }));
+      }
+      if (folderNoticeRepairEl) folderNoticeRepairEl.addEventListener('click', () => repairFolderDataWithConfirm());
       StateStore.subscribe(changes => {
         // A whole-state replacement (workspace switch, sign-out, restore) invalidates every open Folder dialog.
         if (changes && changes._replace) folderStateEpoch += 1;
@@ -741,12 +755,15 @@ export function createPacksScreen({
       }
     }
 
+    // Saves the whole workspace now and reports whether the browser accepted it: `{ ok: true }` or
+    // `{ ok: false, blocked? }`. Anything that is not an explicit acknowledgement counts as not saved.
     function persistFolderStateNow() {
-      if (typeof persistNow !== 'function') return;
+      if (typeof persistNow !== 'function') return { ok: false };
       try {
-        persistNow();
-      } catch (_err) {
-        // Autosave remains the fallback; this only closes the immediate-reload gap.
+        const result = persistNow();
+        return result && result.ok === true ? result : { ok: false };
+      } catch (error) {
+        return { ok: false, error };
       }
     }
 
@@ -798,17 +815,63 @@ export function createPacksScreen({
       }
     }
 
+    // The one message for a Folder change. Success is announced only after the save was accepted. Otherwise a
+    // single warning says the change exists only on screen, with a Retry that is bound to the same workspace.
+    // The state itself stays in memory, so a retry (or the next saved change) writes it.
+    function announceFolderSave(saved, successMessage, subject) {
+      if (saved && saved.ok) {
+        UIComponents.showToast(successMessage, 'success');
+        return true;
+      }
+      const guard = beginFolderDialog();
+      const reason = saved && saved.blocked
+        ? 'Saving is paused until an interrupted restore is recovered.'
+        : 'Free up browser storage, then use Retry.';
+      UIComponents.showToast(`Not saved: ${subject} exists only on screen and will be lost on reload. ${reason}`, 'error', {
+        title: 'Folders',
+        duration: 12000,
+        actions: [
+          {
+            label: 'Retry',
+            onClick: () => {
+              if (!folderDialogIsCurrent(guard)) return;
+              announceFolderSave(persistFolderStateNow(), successMessage, subject);
+            },
+          },
+        ],
+      });
+      return false;
+    }
+
+    // The stored Folder graph as it is: usable Folders, damaged records and Load Plans that point nowhere.
+    function getSafeFolderGraph() {
+      try {
+        const graph = FolderLibrary.getFolderGraph();
+        if (graph && Array.isArray(graph.unresolved) && Array.isArray(graph.issues)) return graph;
+      } catch (_err) {
+        // Fall through to a graph with nothing to report.
+      }
+      return { folders: [], issues: [], unresolved: [], ambiguousIds: [], clean: true };
+    }
+
     function getFolderFilterModel(allPacks) {
       const packs = Array.isArray(allPacks) ? allPacks : [];
       const folders = getSafeFolders();
+      const graph = getSafeFolderGraph();
+      const unresolvedPackIds = new Set(graph.unresolved.map(entry => entry.packId));
       const folderIds = new Set(folders.map(folder => String(folder.id)));
-      if (activeFolderId && activeFolderId !== UNFILED_FOLDER_ID && !folderIds.has(activeFolderId)) {
+      if (activeFolderId && !folderIds.has(activeFolderId)) {
         activeFolderId = null;
       }
 
       const counts = new Map();
       let unfiledCount = 0;
+      let unresolvedCount = 0;
       packs.forEach(pack => {
+        if (pack && unresolvedPackIds.has(pack.id)) {
+          unresolvedCount += 1;
+          return;
+        }
         const folderId = pack && pack.folderId ? String(pack.folderId) : null;
         if (!folderId) {
           unfiledCount += 1;
@@ -816,9 +879,13 @@ export function createPacksScreen({
         }
         counts.set(folderId, (counts.get(folderId) || 0) + 1);
       });
+      if (activeSpecialFilter === FILTER_UNRESOLVED && unresolvedCount === 0) activeSpecialFilter = null;
 
       return {
         folders,
+        graph,
+        unresolvedPackIds,
+        unresolvedCount,
         totalCount: packs.length,
         unfiledCount,
         counts,
@@ -828,8 +895,10 @@ export function createPacksScreen({
       };
     }
 
-    function setActiveFolderFilter(folderIdOrNull) {
-      activeFolderId = folderIdOrNull == null ? null : String(folderIdOrNull);
+    // One filter at a time: All (both empty), Unfiled, or a real Folder.
+    function setActiveFolderFilter({ folderId = null, special = null } = {}) {
+      activeFolderId = special ? null : folderId == null ? null : String(folderId);
+      activeSpecialFilter = special || null;
       packsListState.pageIndex = 0;
       render();
     }
@@ -871,16 +940,38 @@ export function createPacksScreen({
 
     function renderFoldersButton(allPacks) {
       const button = ensureFoldersButton();
-      if (!button || !foldersButtonLabelEl) return;
       const model = getFolderFilterModel(allPacks);
+      if (!button || !foldersButtonLabelEl) return model;
       let label = 'Folders';
-      if (activeFolderId === UNFILED_FOLDER_ID) {
+      if (activeSpecialFilter === FILTER_UNFILED) {
         label = 'Unfiled';
+      } else if (activeSpecialFilter === FILTER_UNRESOLVED) {
+        label = 'Needs attention';
       } else if (activeFolderId && model.activeFolder) {
         label = model.activeFolder.name || 'Untitled Folder';
       }
       foldersButtonLabelEl.textContent = label;
-      button.classList.toggle('tp3d-packs-folder-btn--active', Boolean(activeFolderId));
+      button.classList.toggle('tp3d-packs-folder-btn--active', Boolean(activeFolderId || activeSpecialFilter));
+      return model;
+    }
+
+    // A damaged Folder graph is never silent: this notice stays on the Load Plans screen until it is repaired.
+    function renderFolderNotice(model) {
+      if (!folderNoticeEl || !folderNoticeMsgEl) return;
+      const unresolved = model.unresolvedCount;
+      const damaged = model.graph.issues.length;
+      folderNoticeEl.style.display = unresolved || damaged ? '' : 'none';
+      if (!unresolved && !damaged) return;
+      const parts = [];
+      if (unresolved) {
+        parts.push(`${unresolved} load plan${unresolved === 1 ? ' points' : 's point'} to a Folder that cannot be found or used safely.`);
+      }
+      if (damaged) {
+        parts.push(`${damaged} stored Folder record${damaged === 1 ? ' is' : 's are'} damaged.`);
+      }
+      parts.push('Nothing was changed or deleted. Workspace Backup may refuse to run until this is repaired.');
+      folderNoticeMsgEl.textContent = parts.join(' ');
+      if (folderNoticeShowEl) folderNoticeShowEl.style.display = unresolved ? '' : 'none';
     }
 
     function getOpenFoldersDropdown() {
@@ -920,9 +1011,9 @@ export function createPacksScreen({
       }, 0);
     }
 
-    function selectFolderFilter(folderIdOrNull) {
+    function selectFolderFilter(filter) {
       setFoldersButtonExpanded(false);
-      setActiveFolderFilter(folderIdOrNull);
+      setActiveFolderFilter(filter);
     }
 
     function openCreateFolderModal() {
@@ -949,13 +1040,14 @@ export function createPacksScreen({
               if (!folderDialogIsCurrent(guard)) return true;
               const folderName = String(name.input.value || '').trim();
               const created = FolderLibrary.createFolder(folderName);
-              persistFolderStateNow();
+              const saved = persistFolderStateNow();
               if (created && created.id) {
                 activeFolderId = String(created.id);
+                activeSpecialFilter = null;
                 packsListState.pageIndex = 0;
               }
               render();
-              UIComponents.showToast('Folder created', 'success');
+              announceFolderSave(saved, 'Folder created', 'the new Folder');
               return true;
             },
           },
@@ -992,9 +1084,9 @@ export function createPacksScreen({
                 UIComponents.showToast('Could not rename folder', 'warning');
                 return true;
               }
-              persistFolderStateNow();
+              const saved = persistFolderStateNow();
               render();
-              UIComponents.showToast('Folder renamed', 'success');
+              announceFolderSave(saved, 'Folder renamed', 'the new Folder name');
               return true;
             },
           },
@@ -1035,13 +1127,57 @@ export function createPacksScreen({
         UIComponents.showToast('Could not delete folder', 'warning');
         return;
       }
-      persistFolderStateNow();
+      const saved = persistFolderStateNow();
       if (activeFolderId === folderId) {
         activeFolderId = null;
         packsListState.pageIndex = 0;
       }
       render();
-      UIComponents.showToast('Folder deleted', 'success');
+      announceFolderSave(saved, 'Folder deleted', 'the Folder deletion');
+    }
+
+    // The explicit recovery for a damaged Folder graph. Nothing is repaired until the original has been kept.
+    async function repairFolderDataWithConfirm() {
+      if (mutationBlockedWhileBusy()) return;
+      const guard = beginFolderDialog();
+      const message = document.createElement('div');
+      message.textContent =
+        'A copy of the current Folder data is kept in this browser first. Then: a Folder whose ID is shared keeps ' +
+        'it for the first Folder only and the others get a new ID; load plans that point to a Folder that cannot be ' +
+        'found move to Unfiled; unreadable Folder records are left out. Load plans, Cases and cargo are not deleted.';
+      let ok;
+      try {
+        ok = await UIComponents.confirm({
+          title: 'Repair Folder data?',
+          message,
+          okLabel: 'Repair',
+          onOpen: modal => trackFolderDialog(guard, modal),
+        });
+      } finally {
+        releaseFolderDialog(guard);
+      }
+      if (!ok) return;
+      if (mutationBlockedWhileBusy()) return;
+      if (!folderDialogIsCurrent(guard)) return;
+
+      const kept = typeof preserveFolderEvidence === 'function' ? preserveFolderEvidence() : { ok: false };
+      if (!kept || kept.ok !== true) {
+        UIComponents.showToast(
+          'Could not keep a copy of the current Folder data, so nothing was repaired. Free up browser storage and try again.',
+          'error',
+          { title: 'Folders' }
+        );
+        return;
+      }
+      const repaired = FolderLibrary.repairFolderGraph();
+      if (!repaired) {
+        UIComponents.showToast('Folder data needs no repair.', 'info', { title: 'Folders' });
+        return;
+      }
+      const saved = persistFolderStateNow();
+      packsListState.pageIndex = 0;
+      render();
+      announceFolderSave(saved, 'Folder data repaired. The original copy is kept in this browser.', 'the repair');
     }
 
     function movePackToFolder(pack, folderIdOrNull) {
@@ -1052,10 +1188,10 @@ export function createPacksScreen({
         UIComponents.showToast('Could not move load plan to folder', 'warning');
         return false;
       }
-      persistFolderStateNow();
+      const saved = persistFolderStateNow();
       packsListState.pageIndex = 0;
       render();
-      UIComponents.showToast(folderIdOrNull ? 'Load plan moved to folder' : 'Load plan moved to Unfiled', 'success');
+      announceFolderSave(saved, folderIdOrNull ? 'Load plan moved to folder' : 'Load plan moved to Unfiled', 'the move');
       return true;
     }
 
@@ -1140,18 +1276,28 @@ export function createPacksScreen({
         {
           label: `All Load Plans (${model.totalCount})`,
           icon: 'fa-solid fa-layer-group',
-          active: activeFolderId === null,
-          rightIcon: activeFolderId === null ? 'fa-solid fa-check' : '',
-          onClick: () => selectFolderFilter(null),
+          active: activeFolderId === null && activeSpecialFilter === null,
+          rightIcon: activeFolderId === null && activeSpecialFilter === null ? 'fa-solid fa-check' : '',
+          onClick: () => selectFolderFilter({}),
         },
         {
           label: `Unfiled (${model.unfiledCount})`,
           icon: 'fa-solid fa-folder-open',
-          active: activeFolderId === UNFILED_FOLDER_ID,
-          rightIcon: activeFolderId === UNFILED_FOLDER_ID ? 'fa-solid fa-check' : '',
-          onClick: () => selectFolderFilter(UNFILED_FOLDER_ID),
+          active: activeSpecialFilter === FILTER_UNFILED,
+          rightIcon: activeSpecialFilter === FILTER_UNFILED ? 'fa-solid fa-check' : '',
+          onClick: () => selectFolderFilter({ special: FILTER_UNFILED }),
         },
       ]);
+
+      if (model.unresolvedCount > 0) {
+        items.push({
+          label: `Needs attention (${model.unresolvedCount})`,
+          icon: 'fa-solid fa-triangle-exclamation',
+          active: activeSpecialFilter === FILTER_UNRESOLVED,
+          rightIcon: activeSpecialFilter === FILTER_UNRESOLVED ? 'fa-solid fa-check' : '',
+          onClick: () => selectFolderFilter({ special: FILTER_UNRESOLVED }),
+        });
+      }
 
       if (model.folders.length) {
         items.push({ type: 'divider' });
@@ -1162,7 +1308,7 @@ export function createPacksScreen({
             icon: 'fa-solid fa-folder',
             active: activeFolderId === folderId,
             rightIcon: activeFolderId === folderId ? 'fa-solid fa-check' : '',
-            onClick: () => selectFolderFilter(folderId),
+            onClick: () => selectFolderFilter({ folderId }),
           });
         });
       } else {
@@ -1210,6 +1356,18 @@ export function createPacksScreen({
           },
         }
       );
+
+      if (!model.graph.clean) {
+        items.push({
+          label: 'Repair Folder data\u2026',
+          icon: 'fa-solid fa-screwdriver-wrench',
+          onClick: () => {
+            UIComponents.closeAllDropdowns();
+            setFoldersButtonExpanded(false);
+            repairFolderDataWithConfirm();
+          },
+        });
+      }
 
       // Every action in this menu is bound to the user/workspace it was opened in.
       const guard = beginFolderDialog();
@@ -1639,15 +1797,17 @@ export function createPacksScreen({
         'weight-asc': (a, b) => compareWeight(a, b, 'asc'),
         'weight-desc': (a, b) => compareWeight(a, b, 'desc'),
       };
-      renderFoldersButton(allPacks);
+      const folderModel = renderFoldersButton(allPacks);
+      renderFolderNotice(folderModel);
       updateStatusFilterChips(allPacks);
 
       const packs = allPacks
         .filter(p => packMatchesSearch(p, q))
         .filter(p => {
-          if (activeFolderId === null) return true;
+          if (activeFolderId === null && activeSpecialFilter === null) return true;
           const folderId = p && p.folderId ? String(p.folderId) : null;
-          if (activeFolderId === UNFILED_FOLDER_ID) return folderId === null;
+          if (activeSpecialFilter === FILTER_UNRESOLVED) return folderModel.unresolvedPackIds.has(p.id);
+          if (activeSpecialFilter === FILTER_UNFILED) return folderId === null && !folderModel.unresolvedPackIds.has(p.id);
           return folderId === activeFolderId;
         })
         .filter(p => {
@@ -1666,7 +1826,7 @@ export function createPacksScreen({
 
       filteredPacks = packs;
 
-      const newDatasetKey = `${q}::${sortKey}::${activeFolderId || 'all'}::${filters.empty}${filters.partial}${filters.full}`;
+      const newDatasetKey = `${q}::${sortKey}::${activeSpecialFilter ? `special:${activeSpecialFilter}` : activeFolderId ? `folder:${activeFolderId}` : 'all'}::${filters.empty}${filters.partial}${filters.full}`;
       if (datasetKey !== newDatasetKey) {
         selectedIds.clear();
         datasetKey = newDatasetKey;
@@ -1729,6 +1889,7 @@ export function createPacksScreen({
       selectedIds.clear();
       filteredPacks = [];
       activeFolderId = null;
+      activeSpecialFilter = null;
       datasetKey = '';
       packsListState.pageIndex = 0;
       if (selectAllEl) {

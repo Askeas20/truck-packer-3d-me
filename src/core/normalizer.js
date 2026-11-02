@@ -451,6 +451,128 @@ export function normalizeFolder(folder, now) {
   };
 }
 
+// A repeated Folder id keeps its first holder; every later holder gets a new id.
+function dedupeFolderIds(folders) {
+  const seenFolderIds = new Set();
+  folders.forEach(folder => {
+    if (!seenFolderIds.has(folder.id)) {
+      seenFolderIds.add(folder.id);
+      return;
+    }
+    folder.id = uuid();
+    seenFolderIds.add(folder.id);
+  });
+  return folders;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+// A Folder id the app can act on: a string with no surrounding blanks (the shape every id the app mints has).
+function folderRecordId(folder) {
+  return isRecord(folder) && typeof folder.id === 'string' && folder.id !== '' && folder.id === folder.id.trim()
+    ? folder.id
+    : '';
+}
+
+// The first field-level problem the strict Workspace Backup validator would reject, or ''.
+function folderFieldProblem(folder) {
+  if (typeof folder.name !== 'string' || !folder.name.trim()) return 'invalid-name';
+  if (folder.scope != null && folder.scope !== 'pack') return 'invalid-scope';
+  if (folder.parentFolderId != null && String(folder.parentFolderId).trim()) return 'nested';
+  if (folder.sortOrder != null && !(Number.isInteger(folder.sortOrder) && folder.sortOrder >= 0)) return 'invalid-sort-order';
+  if (['createdAt', 'updatedAt'].some(key => folder[key] != null && !Number.isFinite(folder[key]))) return 'invalid-timestamp';
+  return '';
+}
+
+/**
+ * Read-only check of the Folder graph exactly as a workspace holds it. It applies the rules the strict Workspace
+ * Backup validator enforces (unique non-blank ids, flat Folders, every Load Plan folderId resolves) but reports
+ * instead of throwing, and it never changes, drops or repairs anything.
+ *  - `folders`: the records the Folder UI may show and act on (same objects, unique valid ids).
+ *  - `issues`: damaged records `{ index, kind, id? }`. A record with a field problem stays usable; a non-object,
+ *    an invalid id or a repeated id does not, because acting on it could hit the wrong record.
+ *  - `unresolved`: Load Plans whose folderId matches no usable Folder, `{ packId, folderId, reason }`
+ *    with reason `missing | ambiguous | invalid`.
+ * @param {unknown} folderLibrary
+ * @param {unknown} packLibrary
+ */
+export function inspectFolderGraph(folderLibrary, packLibrary) {
+  const records = Array.isArray(folderLibrary) ? folderLibrary : [];
+  const packs = Array.isArray(packLibrary) ? packLibrary : [];
+  const idCounts = new Map();
+  records.forEach(record => {
+    const id = folderRecordId(record);
+    if (id) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+  });
+
+  const folders = [];
+  const issues = [];
+  const ambiguousIds = new Set();
+  records.forEach((record, index) => {
+    if (!isRecord(record)) {
+      issues.push({ index, kind: 'not-a-record' });
+      return;
+    }
+    const id = folderRecordId(record);
+    if (!id) {
+      issues.push({ index, kind: 'invalid-id' });
+      return;
+    }
+    if (idCounts.get(id) > 1) {
+      ambiguousIds.add(id);
+      issues.push({ index, kind: 'duplicate-id', id });
+      return;
+    }
+    const problem = folderFieldProblem(record);
+    if (problem) issues.push({ index, kind: problem, id });
+    folders.push(record);
+  });
+
+  const usableIds = new Set(folders.map(folder => folder.id));
+  const unresolved = [];
+  packs.forEach(pack => {
+    if (!isRecord(pack)) return;
+    const ref = pack.folderId;
+    if (ref == null || (typeof ref === 'string' && !ref.trim())) return;
+    if (typeof ref === 'string' && usableIds.has(ref)) return;
+    unresolved.push({
+      packId: pack.id,
+      folderId: ref,
+      reason: typeof ref !== 'string' ? 'invalid' : ambiguousIds.has(ref) ? 'ambiguous' : 'missing',
+    });
+  });
+
+  return {
+    folders,
+    issues,
+    ambiguousIds: Array.from(ambiguousIds),
+    unresolved,
+    clean: issues.length === 0 && unresolved.length === 0,
+  };
+}
+
+/**
+ * The explicit repair for a damaged Folder graph, built from the same rules Workspace Backup restore applies
+ * (normalizeFolder, first holder keeps a repeated id, a Load Plan that points nowhere becomes Unfiled). Records
+ * that are not objects hold no data and are left out; every other record survives. Load Plans are returned
+ * unchanged (same objects) unless their folderId had to be cleared, and `lastEdited` is never touched.
+ * Callers must have preserved the original graph first; this function itself never writes anywhere.
+ */
+export function repairFolderGraph(folderLibrary, packLibrary, now = Date.now()) {
+  const records = Array.isArray(folderLibrary) ? folderLibrary : [];
+  const packs = Array.isArray(packLibrary) ? packLibrary : [];
+  const folders = dedupeFolderIds(records.filter(isRecord).map(record => normalizeFolder(record, now)));
+  const folderIds = new Set(folders.map(folder => folder.id));
+  const packLibraryNext = packs.map(pack => {
+    if (!isRecord(pack) || pack.folderId == null) return pack;
+    if (typeof pack.folderId === 'string' && (folderIds.has(pack.folderId) || !pack.folderId.trim())) return pack;
+    return { ...pack, folderId: null };
+  });
+  return { folderLibrary: folders, packLibrary: packLibraryNext };
+}
+
 export function normalizePack(p, caseMap = new Map(), now = Date.now()) {
   const truck = normalizeTruck(p && p.truck);
   const rawCases = Array.isArray(p && p.cases) ? p.cases : [];
@@ -526,16 +648,7 @@ export function normalizePack(p, caseMap = new Map(), now = Date.now()) {
 export function normalizeAppData(data) {
   const now = Date.now();
   const rawFolders = Array.isArray(data && data.folderLibrary) ? data.folderLibrary : [];
-  const folders = rawFolders.map(folder => normalizeFolder(folder, now));
-  const seenFolderIds = new Set();
-  folders.forEach(folder => {
-    if (!seenFolderIds.has(folder.id)) {
-      seenFolderIds.add(folder.id);
-      return;
-    }
-    folder.id = uuid();
-    seenFolderIds.add(folder.id);
-  });
+  const folders = dedupeFolderIds(rawFolders.map(folder => normalizeFolder(folder, now)));
   const folderIds = new Set(folders.map(folder => folder.id));
 
   const rawCases = Array.isArray(data && data.caseLibrary) ? data.caseLibrary : [];
