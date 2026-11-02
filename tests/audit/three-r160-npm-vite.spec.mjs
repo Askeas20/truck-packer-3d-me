@@ -255,6 +255,19 @@ test('CI lanes: the browser smoke selection names real tests, each exactly once'
   assert.ok(whole.length >= 1 && whole.every(name => !specsIn(patterned).includes(name)));
 });
 
+test('CI lanes: the browser smoke lane also runs the Folder Stage 1 real-app tests, and selects exactly those', () => {
+  const clauses = packageJson.scripts['test:ci:browser'].split(' && ');
+  assert.equal(clauses.length, 3, 'whole smoke specs, the patterned smoke set, then the Folder Stage 1 selection');
+  assert.equal(
+    clauses[2],
+    'node --test --test-concurrency=1 --test-name-pattern="^Folder Stage 1" tests/behavioral/app-js-characterization.spec.mjs'
+  );
+  const titles = [...read('tests/behavioral/app-js-characterization.spec.mjs')
+    .matchAll(/^test\(\s*(['"`])((?:\\.|(?!\1).)+)\1\s*,/gmu)].map(match => match[2]);
+  const selected = titles.filter(title => /^Folder Stage 1/u.test(title));
+  assert.equal(selected.length, 10, `the pattern selects ${selected.length} tests; a renamed or added Stage 1 test must be reviewed here`);
+});
+
 test('CI lanes: the Quality Gate workflow keeps its identity and stays one fast job', () => {
   const workflow = read('.github/workflows/quality-gate.yml');
   const code = workflow.split('\n').filter(line => !line.trim().startsWith('#')).join('\n');
