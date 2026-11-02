@@ -2281,17 +2281,20 @@ test('Folder Stage 1 F-03: damaged Folder data stays as stored, no plan is invis
   const dialog = page.locator('#modal-root .modal-overlay:not([data-auth-overlay])');
   await dialog.waitFor({ state: 'visible' });
   assert.match(await dialog.textContent(), /A copy of the current Folder data is kept in this browser first/);
+  assert.match(await dialog.textContent(), /point to a shared ID, or to a Folder that cannot be found, move to Unfiled/);
   await page.getByRole('button', { name: 'Repair', exact: true }).click();
   await notice.waitFor({ state: 'hidden' });
   const repaired = JSON.parse(await folderSnapshot(page));
   assert.equal(repaired.packs.length, 4, 'no Load Plan is lost');
   assert.deepEqual(repaired.folders.map(f => f[1]).sort(), ['Dup First', 'Dup Second', 'Good Folder']);
   assert.equal(new Set(repaired.folders.map(f => f[0])).size, 3, 'every Folder id is unique again');
-  assert.equal(repaired.packs.find(p => p[0] === 'p-dup')[1], 'f-dup', 'the first holder of the shared id keeps its plan');
+  assert.equal(repaired.packs.find(p => p[0] === 'p-dup')[1], null, 'a plan on a shared id is Unfiled: the app does not guess its Folder');
   assert.deepEqual(await shownPlans(page, titles), titles);
-  const evidenceStill = await page.evaluate(key => JSON.parse(localStorage.getItem(key)).folderLibrary.length,
-    `${folderWorkspaceKey(ORG_A)}:folder-graph-evidence`);
-  assert.equal(evidenceStill, 3, 'the original copy is still there after the repair');
+  const evidenceStill = await page.evaluate(key => {
+    const kept = JSON.parse(localStorage.getItem(key));
+    return [kept.folderLibrary.length, kept.packFolderRefs.find(r => r.id === 'p-dup').folderId];
+  }, `${folderWorkspaceKey(ORG_A)}:folder-graph-evidence`);
+  assert.deepEqual(evidenceStill, [3, 'f-dup'], 'the original copy, including the shared-id reference, is still there after the repair');
   assert.deepEqual(scenario.diagnostics.pageErrors, []);
 });
 

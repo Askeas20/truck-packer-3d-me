@@ -1284,9 +1284,10 @@ export function createPacksScreen({
       const guard = beginFolderDialog();
       const message = document.createElement('div');
       message.textContent =
-        'A copy of the current Folder data is kept in this browser first. Then: a Folder whose ID is shared keeps ' +
-        'it for the first Folder only and the others get a new ID; load plans that point to a Folder that cannot be ' +
-        'found move to Unfiled; unreadable Folder records are left out. Load plans, Cases and cargo are not deleted.';
+        'A copy of the current Folder data is kept in this browser first. Then: Folders that share an ID are all ' +
+        'kept, but only the first keeps the ID and the others get a new one; load plans that point to a shared ID, ' +
+        'or to a Folder that cannot be found, move to Unfiled (the app cannot tell which Folder a load plan was in); ' +
+        'unreadable Folder records are left out. Load plans, Cases and cargo are not deleted.';
       let ok;
       try {
         ok = await UIComponents.confirm({

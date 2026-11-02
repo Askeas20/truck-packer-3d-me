@@ -1527,7 +1527,8 @@ test('Stage 1 F-03 the explicit repair keeps Load Plans and cargo, uses the rest
     assert.ok(packs.every(p => p.lastEdited === 5), 'a repair is not an edit: lastEdited is unchanged');
     assert.equal(packs.find(p => p.id === 'p-ghost').folderId, null, 'a Load Plan that pointed nowhere is Unfiled');
     assert.equal(packs.find(p => p.id === 'p-ok').folderId, 'f-good', 'a valid assignment is untouched');
-    assert.equal(packs.find(p => p.id === 'p-dup').folderId, 'f-dup', 'the first holder of a repeated id keeps its Load Plans');
+    assert.equal(packs.find(p => p.id === 'p-dup').folderId, null,
+      'a Load Plan that pointed at a repeated id is Unfiled: the app cannot tell which Folder it was in, so it never guesses');
     const names = StateStore.get('folderLibrary').map(f => f.name);
     assert.ok(names.includes('Dup first') && names.includes('Dup second'), 'both records that shared an id survive');
     assert.equal(new Set(StateStore.get('folderLibrary').map(f => f.id)).size, StateStore.get('folderLibrary').length,
@@ -1536,6 +1537,43 @@ test('Stage 1 F-03 the explicit repair keeps Load Plans and cargo, uses the rest
 
     StateStore.undo();
     assert.equal(FolderLibrary.getFolderGraph().clean, false, 'Undo returns the original graph');
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test('Stage 1 D1 repair never guesses: a Load Plan on a repeated Folder id is Unfiled whatever order the Folders are stored in', async () => {
+  const { repairFolderGraph } = await import(`${normalizerPath.href}?d1=${Date.now()}-${Math.random()}`);
+  const originalWindow = globalThis.window;
+  globalThis.window = { crypto: globalThis.crypto };
+  try {
+    const rich = { id: 'p-dup', title: 'Dup', folderId: 'f-dup', lastEdited: 5, cases: [{ id: 'i1', caseId: 'c1' }], annotations: [{ id: 'a1' }], measurements: [{ id: 'm1' }] };
+    const folder = (id, name) => ({ id, name, scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1 });
+    const folders = [folder('f-good', 'Good'), folder('f-dup', 'Dup first'), folder('f-dup', 'Dup second')];
+    const packs = [{ id: 'p-ok', folderId: 'f-good', lastEdited: 5 }, rich, { id: 'p-ghost', folderId: 'f-gone', lastEdited: 5 }];
+    const swapped = [folders[0], folders[2], folders[1]];
+    const assignments = result => result.packLibrary.map(pack => [pack.id, pack.folderId]);
+
+    const forward = repairFolderGraph(folders, packs, 99);
+    const reversed = repairFolderGraph(swapped, packs, 99);
+    assert.deepEqual(assignments(forward), [['p-ok', 'f-good'], ['p-dup', null], ['p-ghost', null]]);
+    assert.deepEqual(assignments(reversed), assignments(forward), 'swapping the repeated Folders changes no assignment');
+
+    const repairedDup = forward.packLibrary.find(pack => pack.id === 'p-dup');
+    assert.deepEqual({ ...repairedDup, folderId: 'f-dup' }, rich, 'only folderId changes: identity, cargo, annotations, measurements and lastEdited stay');
+    assert.equal(forward.packLibrary.find(pack => pack.id === 'p-ok'), packs[0], 'a valid assignment is returned untouched (same object)');
+    [forward, reversed].forEach(result => {
+      assert.deepEqual(result.folderLibrary.map(f => f.name).sort(), ['Dup first', 'Dup second', 'Good'], 'every Folder survives');
+      assert.equal(new Set(result.folderLibrary.map(f => f.id)).size, 3, 'every Folder id is unique afterwards');
+    });
+    assert.equal(JSON.stringify(packs[1]), JSON.stringify(rich), 'the input Load Plans are not mutated');
+
+    // Ids that only collide once they are normalized (a padded id beside the same id) are ambiguous too.
+    const padded = [folder(' f-x', 'Padded'), folder('f-x', 'Exact')];
+    const refs = [{ id: 'p-x', folderId: 'f-x', lastEdited: 5 }];
+    assert.equal(repairFolderGraph(padded, refs, 99).packLibrary[0].folderId, null);
+    assert.equal(repairFolderGraph([padded[1], padded[0]], refs, 99).packLibrary[0].folderId, null);
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;

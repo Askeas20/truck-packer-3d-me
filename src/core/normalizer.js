@@ -555,19 +555,32 @@ export function inspectFolderGraph(folderLibrary, packLibrary) {
 
 /**
  * The explicit repair for a damaged Folder graph, built from the same rules Workspace Backup restore applies
- * (normalizeFolder, first holder keeps a repeated id, a Load Plan that points nowhere becomes Unfiled). Records
- * that are not objects hold no data and are left out; every other record survives. Load Plans are returned
- * unchanged (same objects) unless their folderId had to be cleared, and `lastEdited` is never touched.
+ * (normalizeFolder, a repeated id keeps its first holder, a Load Plan that points nowhere becomes Unfiled).
+ * Records that are not objects hold no data and are left out; every other record survives. A repeated id cannot
+ * say which of its Folders a Load Plan belonged to, so every Load Plan that points at one is moved to Unfiled
+ * rather than given to whichever Folder comes first (the result never depends on record order). Load Plans are
+ * returned unchanged (same objects) unless their folderId had to be cleared, and `lastEdited` is never touched.
  * Callers must have preserved the original graph first; this function itself never writes anywhere.
  */
 export function repairFolderGraph(folderLibrary, packLibrary, now = Date.now()) {
   const records = Array.isArray(folderLibrary) ? folderLibrary : [];
   const packs = Array.isArray(packLibrary) ? packLibrary : [];
-  const folders = dedupeFolderIds(records.filter(isRecord).map(record => normalizeFolder(record, now)));
+  const normalized = records.filter(isRecord).map(record => normalizeFolder(record, now));
+  // Counted before dedupeFolderIds re-ids anything: an id more than one record holds is ambiguous.
+  const claimedIds = new Set();
+  const ambiguousIds = new Set();
+  normalized.forEach(folder => (claimedIds.has(folder.id) ? ambiguousIds : claimedIds).add(folder.id));
+  const folders = dedupeFolderIds(normalized);
   const folderIds = new Set(folders.map(folder => folder.id));
   const packLibraryNext = packs.map(pack => {
     if (!isRecord(pack) || pack.folderId == null) return pack;
-    if (typeof pack.folderId === 'string' && (folderIds.has(pack.folderId) || !pack.folderId.trim())) return pack;
+    if (
+      typeof pack.folderId === 'string' &&
+      !ambiguousIds.has(pack.folderId) &&
+      (folderIds.has(pack.folderId) || !pack.folderId.trim())
+    ) {
+      return pack;
+    }
     return { ...pack, folderId: null };
   });
   return { folderLibrary: folders, packLibrary: packLibraryNext };
