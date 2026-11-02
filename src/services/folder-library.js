@@ -147,7 +147,8 @@ export function renameFolderResult(folderId, name) {
   const existing = usableFolders().find(folder => folder.id === folderId);
   if (!existing) return { ok: false, reason: 'missing', message: 'This Folder is no longer available.' };
   const nextName = trimmedName(name);
-  if (nextName && nextName === existing.name) return { ok: true, changed: false, folder: existing };
+  // Trimmed on both sides: a stored name with surrounding spaces is the same name, and stays exactly as stored.
+  if (nextName && nextName === trimmedName(existing.name)) return { ok: true, changed: false, folder: existing };
   const checked = validateFolderName(name, { excludeFolderId: folderId });
   if (!checked.ok) return checked;
   const folders = getFolders();

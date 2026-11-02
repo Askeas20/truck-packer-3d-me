@@ -1940,6 +1940,58 @@ test('P0-SM-OF-1 UIComponents.confirm() settles exactly once for Confirm/Cancel/
   }
 });
 
+test('P0-SM-OF-1 UIComponents.confirm() whose onOpen throws closes its own modal and settles false once, and later confirmations behave normally', async t => {
+  const { UI, doc, roots, key, dispatch } = installDom(t);
+  const modalRoot = roots.get('modal-root');
+  const opener = doc.body.appendChild(doc.createElement('button'));
+  opener.focus();
+  const footerButton = (modal, index) => modal.modal.children[2].children[index];
+
+  let handed = null;
+  let settlements = 0;
+  const failing = UI.confirm({
+    title: 'Delete?',
+    onOpen: modal => { handed = modal; throw new Error('caller bug'); },
+  }).then(value => { settlements += 1; return value; });
+  assert.equal(await failing, false, 'a throwing onOpen settles false, never rejects');
+  assert.equal(settlements, 1, 'and settles exactly once');
+  assert.ok(handed && handed.overlay, 'the caller was handed the modal before it threw');
+  assert.equal(handed.overlay.isConnected, false, 'the modal was removed, not orphaned');
+  assert.equal(modalRoot.children.length, 0, 'nothing is left in the modal root');
+  assert.deepEqual(UI.modalOwnership.getOwners(), [], 'no modal owner is left behind');
+  assert.equal(doc.activeElement, opener, 'focus returned to where it was');
+
+  // Confirm still resolves true, exactly once, with a well-behaved onOpen.
+  let confirmSettlements = 0;
+  const confirmed = UI.confirm({ title: 'Sure?', onOpen: modal => { handed = modal; } })
+    .then(value => { confirmSettlements += 1; return value; });
+  assert.equal(handed.overlay.isConnected, true, 'a well-behaved onOpen leaves the question open');
+  footerButton(handed, 1).emit('click');
+  assert.equal(await confirmed, true);
+  assert.equal(confirmSettlements, 1);
+  assert.equal(handed.overlay.isConnected, false);
+  assert.equal(doc.activeElement, opener, 'focus restored after Confirm');
+
+  // Cancel, Escape and the backdrop still settle false once.
+  const cancelled = UI.confirm({ title: 'Sure?', onOpen: modal => { handed = modal; } });
+  footerButton(handed, 0).emit('click');
+  assert.equal(await cancelled, false, 'Cancel');
+  const escaped = UI.confirm({ title: 'Sure?', onOpen: modal => { handed = modal; } });
+  dispatch(key('Escape'));
+  assert.equal(await escaped, false, 'Escape');
+  assert.equal(handed.overlay.isConnected, false);
+  const dismissed = UI.confirm({ title: 'Sure?', onOpen: modal => { handed = modal; } });
+  handed.overlay.emit('click', { target: handed.overlay });
+  assert.equal(await dismissed, false, 'backdrop');
+  assert.equal(doc.activeElement, opener, 'focus restored after every dismissal');
+
+  // The intended use: onOpen withdraws the question itself.
+  const withdrawn = UI.confirm({ title: 'Gone?', onOpen: modal => modal.close() });
+  assert.equal(await withdrawn, false, 'a withdrawn question settles false');
+  assert.equal(modalRoot.children.length, 0);
+  assert.deepEqual(UI.modalOwnership.getOwners(), []);
+});
+
 test('P0-SM-OF-1 Help modal wrapper clears its modal reference on every primitive dismissal path and reopens normally', () => {
   const dom = installFakeModalDom();
   try {

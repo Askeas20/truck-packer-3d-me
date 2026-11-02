@@ -1954,6 +1954,40 @@ test('Stage 1 F-06 a rename or move that changes nothing writes nothing', async 
   assert.equal(staleToUnfiled.changed, true, 'a stale reference is not "already Unfiled": moving it is a real repair');
 });
 
+test('Stage 1 review: a legacy padded Folder name saved unchanged is a no-op, and a genuine rename still follows the policy', async () => {
+  const padded = '  Legacy Docks  ';
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: [folderRecord('f-pad', padded, { updatedAt: 111 }), folderRecord('f-b', 'Other', { updatedAt: 222 })],
+  });
+  // A real change followed by Undo leaves a Redo step waiting; saving the same name must not invalidate it.
+  assert.equal(FolderLibrary.renameFolderResult('f-b', 'Other 2').changed, true);
+  assert.equal(StateStore.undo(), true);
+  const before = JSON.stringify(StateStore.get('folderLibrary'));
+  const depth = StateStore.undoDepth();
+
+  ['Legacy Docks', '  Legacy Docks  ', 'Legacy Docks ', '\tLegacy Docks'].forEach(input => {
+    const result = FolderLibrary.renameFolderResult('f-pad', input);
+    assert.deepEqual([result.ok, result.changed], [true, false], `${JSON.stringify(input)} is the same name as the padded one`);
+  });
+  assert.equal(JSON.stringify(StateStore.get('folderLibrary')), before, 'nothing was written, and no record was normalized as a side effect');
+  assert.equal(StateStore.get('folderLibrary')[0].name, padded, 'the padded historical name is kept exactly as stored');
+  assert.equal(StateStore.get('folderLibrary')[0].updatedAt, 111, 'updatedAt is untouched');
+  assert.equal(StateStore.undoDepth(), depth, 'no history step');
+  assert.equal(StateStore.redo(), true, 'the waiting Redo step survived the unchanged saves');
+  assert.equal(StateStore.get('folderLibrary')[1].name, 'Other 2');
+
+  const redone = StateStore.undoDepth();
+  assert.equal(FolderLibrary.renameFolderResult('f-pad', '   ').reason, 'empty', 'a blank name is still refused');
+  const duplicate = FolderLibrary.renameFolderResult('f-pad', ' other 2 ');
+  assert.deepEqual([duplicate.ok, duplicate.reason], [false, 'duplicate'], 'a genuine rename still follows the duplicate rule');
+  assert.equal(StateStore.undoDepth(), redone, 'refused names write nothing');
+  const real = FolderLibrary.renameFolderResult('f-pad', '  Legacy Yard ');
+  assert.deepEqual([real.ok, real.changed], [true, true], 'a genuinely different name is a real change');
+  assert.equal(real.folder.name, 'Legacy Yard', 'a new name is stored trimmed, by the approved policy');
+  assert.ok(real.folder.updatedAt > 111, 'a real rename updates updatedAt');
+  assert.equal(StateStore.undoDepth(), redone + 1, 'and adds exactly one history step');
+});
+
 test('Stage 1 Folder cap and ids: the 2,000 limit matches Workspace Backup and ids stay unique', async () => {
   const { WORKSPACE_BACKUP_LIMITS } = await import(`${importExportPath.href}?cap=${Date.now()}`);
   const { StateStore, FolderLibrary } = await freshFolderService({
