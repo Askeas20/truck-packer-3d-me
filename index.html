@@ -406,14 +406,6 @@
                 </div>
                 <div class="search-shell" style="flex: 1; min-width: 260px; display: none">
                   <div class="search-input"></div>
-                  <div class="search-empty" id="packs-filter-empty">
-                    <div id="packs-filter-empty-msg" style="font-weight: var(--font-semibold); margin-bottom: 4px">
-                      No matching load plans
-                    </div>
-                    <div class="muted" style="font-size: var(--text-sm)">
-                      Try a different keyword or press Esc to reset search.
-                    </div>
-                  </div>
                 </div>
               </div>
               <div class="row tp3d-pack-status-filters" id="packs-filters">
@@ -543,6 +535,15 @@
             <div class="card" id="packs-empty" style="display: none; margin-top: 16px">
               <div style="font-weight: var(--font-semibold); margin-bottom: 6px">No load plans yet</div>
               <div class="muted" style="font-size: var(--text-sm)">Create your first load plan to start planning.</div>
+            </div>
+            <div class="card" id="packs-filter-empty" role="status" style="display: none; margin-top: 16px">
+              <div id="packs-filter-empty-msg" style="font-weight: var(--font-semibold); margin-bottom: 6px">
+                No matching load plans
+              </div>
+              <div class="muted" id="packs-filter-empty-hint" style="font-size: var(--text-sm); margin-bottom: 10px">
+                Try a different keyword or change the filters.
+              </div>
+              <button class="btn" id="packs-filter-empty-clear" type="button">Clear filters</button>
             </div>
           </section>
 

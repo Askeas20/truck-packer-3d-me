@@ -2603,6 +2603,11 @@ const TP3D_BUILD_STAMP = Object.freeze({
       AppShell,
       Storage,
       Utils,
+      // Load Plans Undo/Redo reaches only the Folder steps made on that screen (the Packs screen decides).
+      folderHistory: {
+        undo: () => Boolean(PacksUI && PacksUI.undoFolderStep()),
+        redo: () => Boolean(PacksUI && PacksUI.redoFolderStep()),
+      },
     });
 
     function openExportAppModal() {

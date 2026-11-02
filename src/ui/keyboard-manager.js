@@ -21,6 +21,7 @@ export function createKeyboardManager({
   OperationLifecycle,
   UIComponents,
   Utils,
+  folderHistory = null,
 }) {
   let shortcuts = {};
   const KeyboardManager = (() => {
@@ -100,7 +101,8 @@ export function createKeyboardManager({
     }
 
     function undo() {
-      if (!inEditor()) return false;
+      // Outside the Editor only Load Plans' own Folder steps may be undone (the provider decides, and says no otherwise).
+      if (!inEditor()) return Boolean(folderHistory && folderHistory.undo());
       if (mutationBlockedWhileBusy()) return true;
       const ok = StateStore.undo();
       UIComponents.showToast(ok ? 'Undone' : 'Nothing to undo', ok ? 'info' : 'warning', { title: 'Edit' });
@@ -108,7 +110,7 @@ export function createKeyboardManager({
     }
 
     function redo() {
-      if (!inEditor()) return false;
+      if (!inEditor()) return Boolean(folderHistory && folderHistory.redo());
       if (mutationBlockedWhileBusy()) return true;
       const ok = StateStore.redo();
       UIComponents.showToast(ok ? 'Redone' : 'Nothing to redo', ok ? 'info' : 'warning', { title: 'Edit' });

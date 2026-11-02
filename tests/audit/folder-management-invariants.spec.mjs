@@ -858,10 +858,14 @@ test('phase 0.7C-2 create folder uses existing modal and folder library create A
     'Create Folder must use the existing modal path');
   assert.match(block, /title:\s*['"]New Folder['"]/,
     'Create Folder modal title must be New Folder');
-  assert.match(block, /field\(['"]Folder name['"], ['"]text['"], ['"]e\.g\. Client A['"], false\)/,
-    'Create Folder modal must use field() for optional folder name input');
-  assert.match(block, /FolderLibrary\.createFolder\(folderName\)/,
-    'Create Folder modal must call FolderLibrary.createFolder()');
+  // Stage 1 name policy: the shared text field with an inline error replaces the bare field, and the service
+  // validates (trim, 1-100 code points, no case-insensitive duplicate, 2,000 Folder cap) before it writes.
+  assert.match(block, /identityField\(['"]Folder name['"], ['"]e\.g\. Client A['"]/,
+    'Create Folder modal must use the shared text field that can show a validation message');
+  assert.match(block, /FolderLibrary\.createFolderResult\(name\.input\.value\)/,
+    'Create Folder modal must call FolderLibrary.createFolderResult() with the typed name');
+  assert.match(block, /if \(!result\.ok\) \{[\s\S]{0,160}setIdentityFieldError\(name, result\.message\);[\s\S]{0,80}return false;/,
+    'a refused name shows its message and keeps the dialog open');
 });
 
 test('phase 0.7C-2 create folder selects created folder and refreshes packs', async () => {
@@ -870,10 +874,10 @@ test('phase 0.7C-2 create folder selects created folder and refreshes packs', as
   const end = src.indexOf('\n    function openFoldersDropdown()', start + 1);
   const block = start >= 0 && end > start ? src.slice(start, end) : '';
 
-  assert.match(block, /if \(created && created\.id\)/,
-    'Create Folder must guard created folder id before selecting it');
-  assert.match(block, /activeFolderId = String\(created\.id\)/,
-    'Create Folder must select the newly created folder when an id is returned');
+  assert.match(block, /if \(!result\.ok\)/,
+    'Create Folder must only select a Folder that was actually created');
+  assert.match(block, /activeFolderId = String\(result\.folder\.id\)/,
+    'Create Folder must select the newly created folder');
   assert.match(block, /packsListState\.pageIndex = 0/,
     'Create Folder must reset pack pagination when selecting the new folder');
   assert.match(block, /\brender\(\)/,
@@ -967,8 +971,8 @@ test('phase 0.7C-3 move modal uses folder library move API', async () => {
     'openMoveToFolderModal(pack) helper must exist');
   assert.match(block, /UIComponents\.showModal\(/,
     'Move to Folder must use the existing modal path');
-  assert.match(block, /FolderLibrary\.movePackToFolder\(pack\.id, folderIdOrNull\)/,
-    'move helper must call FolderLibrary.movePackToFolder with pack id and target folder id');
+  assert.match(block, /FolderLibrary\.movePackToFolderResult\(pack\.id, folderIdOrNull\)/,
+    'move helper must call FolderLibrary.movePackToFolderResult with pack id and target folder id');
   assert.match(block, /const folders = getSafeFolders\(\)/,
     'move helper must use folder options from the existing safe folder list');
   assert.match(src, /FolderLibrary\.listFolders\(\)/,
@@ -1001,7 +1005,7 @@ test('phase 0.7C-3 move helper handles success and failed moves safely', async (
   const end = src.indexOf('\n    function openMoveToFolderModal(pack)', start + 1);
   const block = start >= 0 && end > start ? src.slice(start, end) : '';
 
-  assert.match(block, /if \(!moved\)[\s\S]{0,120}UIComponents\.showToast\(['"]Could not move load plan to folder['"], ['"]warning['"]\)/,
+  assert.match(block, /if \(!result\.ok\)[\s\S]{0,120}UIComponents\.showToast\(['"]Could not move load plan to folder['"], ['"]warning['"]\)/,
     'failed move must show a warning toast and not throw');
   assert.match(block, /packsListState\.pageIndex = 0/,
     'successful move must reset pack pagination');
@@ -1072,12 +1076,12 @@ test('phase 0.7C-4 rename folder uses existing modal and folder library rename A
     'Rename Folder must use the existing modal path');
   assert.match(block, /title:\s*['"]Rename Folder['"]/,
     'Rename Folder modal title must be Rename Folder');
-  assert.match(block, /field\(['"]Folder name['"], ['"]text['"], ['"]e\.g\. Client A['"], false\)/,
-    'Rename Folder modal must use field() for optional folder name input');
+  assert.match(block, /identityField\(['"]Folder name['"], ['"]e\.g\. Client A['"]/,
+    'Rename Folder modal must use the shared text field that can show a validation message');
   assert.match(block, /name\.input\.value = folder\.name \|\| ['"]/,
     'Rename Folder modal must pre-fill the current folder name');
-  assert.match(block, /FolderLibrary\.renameFolder\(folderId, name\.input\.value\)/,
-    'Rename Folder must call FolderLibrary.renameFolder with folder id and input value');
+  assert.match(block, /FolderLibrary\.renameFolderResult\(folderId, name\.input\.value\)/,
+    'Rename Folder must call FolderLibrary.renameFolderResult with folder id and input value');
   assert.match(block, /\brender\(\)/,
     'Rename Folder must refresh the Packs screen through render()');
   assert.match(block, /announceFolderSave\(saved, ['"]Folder renamed['"]/,
@@ -1192,13 +1196,13 @@ test('phase 0.7C-4B folder mutations flush workspace persistence immediately', a
     'app.js must pass an immediate workspace save callback that returns the save outcome into the Packs screen');
   assert.match(packsSrc, /function persistFolderStateNow\(\)[\s\S]{0,180}persistNow\(\)/,
     'Packs screen must expose a narrow immediate persistence helper');
-  assert.match(createBlock, /FolderLibrary\.createFolder\(folderName\)[\s\S]{0,80}persistFolderStateNow\(\)/,
+  assert.match(createBlock, /FolderLibrary\.createFolderResult\(name\.input\.value\)[\s\S]{0,400}persistFolderStateNow\(\)/,
     'Create Folder must flush persistence immediately after StateStore mutation');
-  assert.match(renameBlock, /FolderLibrary\.renameFolder\(folderId, name\.input\.value\)[\s\S]{0,260}persistFolderStateNow\(\)/,
+  assert.match(renameBlock, /FolderLibrary\.renameFolderResult\(folderId, name\.input\.value\)[\s\S]{0,700}persistFolderStateNow\(\)/,
     'Rename Folder must flush persistence immediately after StateStore mutation');
   assert.match(deleteBlock, /FolderLibrary\.deleteFolder\(folderId\)[\s\S]{0,180}persistFolderStateNow\(\)/,
     'Delete Folder must flush persistence immediately after StateStore mutation');
-  assert.match(moveBlock, /FolderLibrary\.movePackToFolder\(pack\.id, folderIdOrNull\)[\s\S]{0,180}persistFolderStateNow\(\)/,
+  assert.match(moveBlock, /FolderLibrary\.movePackToFolderResult\(pack\.id, folderIdOrNull\)[\s\S]{0,420}persistFolderStateNow\(\)/,
     'Move Pack to Folder must flush persistence immediately after StateStore mutation');
 });
 
@@ -1245,19 +1249,19 @@ test('phase 0.7C-4B both pack menus contain one compact Move to Folder action', 
 
 test('phase 0.7C-4B folder CRUD and move APIs remain wired from Packs screen only', async () => {
   const src = await fs.readFile(packsScreenPath, 'utf8');
-  const { stdout } = await execFileAsync('git', ['grep', '-n', 'FolderLibrary.movePackToFolder(', '--', 'src']);
+  const { stdout } = await execFileAsync('git', ['grep', '-n', 'FolderLibrary.movePackToFolderResult(', '--', 'src']);
   const callers = stdout
     .split('\n')
     .map(line => line.trim())
     .filter(Boolean);
 
   assert.ok(callers.length >= 1,
-    'FolderLibrary.movePackToFolder must be called from source');
+    'FolderLibrary.movePackToFolderResult must be called from source');
   assert.ok(callers.every(line => line.startsWith('src/screens/packs-screen.js:')),
-    'FolderLibrary.movePackToFolder must only be called by the Packs screen UI');
-  assert.match(src, /FolderLibrary\.createFolder\(folderName\)/,
+    'FolderLibrary.movePackToFolderResult must only be called by the Packs screen UI');
+  assert.match(src, /FolderLibrary\.createFolderResult\(name\.input\.value\)/,
     'Create Folder must remain wired');
-  assert.match(src, /FolderLibrary\.renameFolder\(folderId, name\.input\.value\)/,
+  assert.match(src, /FolderLibrary\.renameFolderResult\(folderId, name\.input\.value\)/,
     'Rename Folder must remain wired');
   assert.match(src, /FolderLibrary\.deleteFolder\(folderId\)/,
     'Delete Folder must remain wired');
@@ -1308,8 +1312,8 @@ test('Stage 1 F-01 the delete confirmation shows the Folder name through textCon
 test('Stage 1 F-02 every Folder dialog binds to its scope and re-checks it before it writes', async () => {
   const src = await fs.readFile(packsScreenPath, 'utf8');
   const cases = [
-    ['create', 'function openCreateFolderModal()', 'FolderLibrary.createFolder('],
-    ['rename', 'function openRenameFolderModal(folder)', 'FolderLibrary.renameFolder('],
+    ['create', 'function openCreateFolderModal()', 'FolderLibrary.createFolderResult('],
+    ['rename', 'function openRenameFolderModal(folder)', 'FolderLibrary.renameFolderResult('],
     ['delete', 'async function deleteFolderWithConfirm(folder)', 'FolderLibrary.deleteFolder('],
     ['move', 'function openMoveToFolderModal(pack)', 'movePackToFolder(pack, folderIdOrNull)'],
   ];
@@ -1326,7 +1330,7 @@ test('Stage 1 F-02 every Folder dialog binds to its scope and re-checks it befor
   });
   assert.match(src, /isCurrent: \(\) => isScopeContextCurrent\(scope\) && epoch === folderStateEpoch/,
     'the guard uses the storage scope generation, so A to B to A is a different identity');
-  assert.match(src, /if \(changes && changes\._replace\) folderStateEpoch \+= 1;\s*dismissFolderDialogs\(\);/,
+  assert.match(src, /if \(changes && changes\._replace\) folderStateEpoch \+= 1;[\s\S]{0,600}dismissFolderDialogs\(\);/,
     'a whole-state replacement invalidates and dismisses open dialogs');
   assert.match(src, /function resetWorkspaceState\(\) \{\s*dismissFolderDialogs\(\{ all: true \}\);/,
     'a workspace reset dismisses every open Folder dialog');
@@ -1615,4 +1619,151 @@ test('Stage 1 F-03 F-05 strict Workspace Backup parsing is unchanged: a real Fol
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
   }
+});
+
+async function freshFolderService(state) {
+  const StateStore = await import(stateStorePath.href);
+  const FolderLibrary = await import(`${folderLibraryPath.href}?c=${Date.now()}-${Math.random()}`);
+  StateStore.init({ caseLibrary: [], packLibrary: [], folderLibrary: [], preferences: {}, ...state });
+  return { StateStore, FolderLibrary };
+}
+
+const folderRecord = (id, name, extra = {}) => ({
+  id, name, scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1, ...extra,
+});
+
+test('Stage 1 name policy: one rule set for creation and rename, enforced by the service', async () => {
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: [folderRecord('f1', 'Client A'), folderRecord('f2', 'Café')],
+  });
+  const refused = (name, reason, excludeFolderId) => {
+    const result = FolderLibrary.validateFolderName(name, { excludeFolderId });
+    assert.equal(result.ok, false, `${JSON.stringify(name)} is refused`);
+    assert.equal(result.reason, reason);
+    assert.ok(result.message.length > 0, 'a refusal always carries a message');
+  };
+
+  assert.equal(FolderLibrary.validateFolderName('  Client B  ').name, 'Client B', 'names are trimmed');
+  refused('', 'empty');
+  refused('   \t ', 'empty');
+  refused(null, 'empty');
+  assert.equal(FolderLibrary.validateFolderName('\u{1F600}'.repeat(100)).ok, true, '100 code points is allowed');
+  refused('\u{1F600}'.repeat(101), 'too-long');
+  refused('x'.repeat(101), 'too-long');
+  refused('client a', 'duplicate');
+  refused('  CLIENT A ', 'duplicate');
+  refused('Café', 'duplicate'); // precomposed and decomposed spellings are the same name
+  assert.equal(FolderLibrary.validateFolderName('client a', { excludeFolderId: 'f1' }).ok, true,
+    'a Folder may change only the case of its own name');
+  ['<img src=x onerror=alert(1)>', 'Q4 / "East" & West', '客户 — Ångström', '#1: 50% off!'].forEach(name => {
+    assert.equal(FolderLibrary.validateFolderName(name).name, name, `${name} is allowed and stored as typed`);
+  });
+
+  const before = JSON.stringify(StateStore.get('folderLibrary'));
+  const depth = StateStore.undoDepth();
+  assert.equal(FolderLibrary.createFolder('client a'), null, 'creation applies the same rules');
+  assert.equal(FolderLibrary.renameFolderResult('f2', 'Client A').ok, false, 'rename applies the same rules');
+  assert.equal(JSON.stringify(StateStore.get('folderLibrary')), before, 'a refused name changes nothing');
+  assert.equal(StateStore.undoDepth(), depth, 'and writes no history');
+  const html = FolderLibrary.createFolder('<b>x</b>');
+  assert.equal(html.name, '<b>x</b>', 'markup-looking text is data, kept exactly');
+});
+
+test('Stage 1 name policy: historical records that break the policy are never rewritten', async () => {
+  const longName = 'L'.repeat(150);
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: [folderRecord('f-long', longName), folderRecord('f-a', 'Same'), folderRecord('f-b', 'same')],
+  });
+  const depth = StateStore.undoDepth();
+  const unchanged = FolderLibrary.renameFolderResult('f-long', longName);
+  assert.deepEqual([unchanged.ok, unchanged.changed], [true, false], 'saving a historical name as it is is not an error and not a change');
+  assert.equal(FolderLibrary.renameFolderResult('f-a', 'Same').changed, false);
+  assert.equal(StateStore.undoDepth(), depth);
+  assert.deepEqual(StateStore.get('folderLibrary').map(f => f.name), [longName, 'Same', 'same'],
+    'long and case-duplicate historical names are kept exactly');
+  assert.equal(FolderLibrary.renameFolderResult('f-long', 'x'.repeat(101)).reason, 'too-long',
+    'a new name for a historical record must follow the policy');
+});
+
+test('Stage 1 F-06 a rename or move that changes nothing writes nothing', async () => {
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: [folderRecord('f1', 'Client A', { updatedAt: 111 }), folderRecord('f2', 'Other')],
+    packLibrary: [
+      { id: 'p-in', title: 'In', folderId: 'f1', lastEdited: 500, thumbnail: 'data:keep', cases: [{ id: 'i1' }] },
+      { id: 'p-free', title: 'Free', folderId: null, lastEdited: 600 },
+      { id: 'p-none', title: 'None', lastEdited: 650 },
+      { id: 'p-stale', title: 'Stale', folderId: 'f-gone', lastEdited: 700 },
+    ],
+  });
+  const snapshot = () => JSON.stringify([StateStore.get('folderLibrary'), StateStore.get('packLibrary')]);
+  const before = snapshot();
+  const depth = StateStore.undoDepth();
+
+  const sameRename = FolderLibrary.renameFolderResult('f1', '  Client A ');
+  assert.deepEqual([sameRename.ok, sameRename.changed], [true, false], 'the same name after trimming is not a change');
+  assert.equal(sameRename.folder.updatedAt, 111, 'updatedAt is untouched');
+  const sameMove = FolderLibrary.movePackToFolderResult('p-in', 'f1');
+  assert.deepEqual([sameMove.ok, sameMove.changed], [true, false], 'moving to the current Folder is not a change');
+  assert.equal(FolderLibrary.movePackToFolderResult('p-free', null).changed, false, 'null to null is not a change');
+  assert.equal(FolderLibrary.movePackToFolderResult('p-none', '').changed, false, 'a missing folderId is already Unfiled');
+  assert.equal(snapshot(), before, 'nothing was written: no lastEdited, no preview field, no cargo change');
+  assert.equal(StateStore.undoDepth(), depth, 'no history step, so Redo is not invalidated');
+  StateStore.undo();
+  StateStore.redo(); // would be impossible if a no-op had pushed a step over the redo tail
+
+  const caseOnly = FolderLibrary.renameFolderResult('f1', 'client a');
+  assert.deepEqual([caseOnly.ok, caseOnly.changed], [true, true], 'a case-only rename is a real change');
+  assert.equal(StateStore.undoDepth() - depth, 1);
+
+  const realMove = FolderLibrary.movePackToFolderResult('p-in', 'f2');
+  assert.equal(realMove.changed, true);
+  assert.ok(realMove.pack.lastEdited > 500, 'a real move keeps the existing lastEdited behaviour');
+  assert.equal(realMove.pack.thumbnail, 'data:keep', 'a move does not touch the preview');
+  assert.deepEqual(realMove.pack.cases, [{ id: 'i1' }], 'a move does not touch cargo');
+  const staleToUnfiled = FolderLibrary.movePackToFolderResult('p-stale', null);
+  assert.equal(staleToUnfiled.changed, true, 'a stale reference is not "already Unfiled": moving it is a real repair');
+});
+
+test('Stage 1 Folder cap and ids: the 2,000 limit matches Workspace Backup and ids stay unique', async () => {
+  const { WORKSPACE_BACKUP_LIMITS } = await import(`${importExportPath.href}?cap=${Date.now()}`);
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: Array.from({ length: 1999 }, (_, i) => folderRecord(`f-${i}`, `Folder ${i}`)),
+  });
+  assert.equal(FolderLibrary.MAX_FOLDERS, WORKSPACE_BACKUP_LIMITS.maxFolders, 'one limit, so a backup of a full workspace still works');
+  const last = FolderLibrary.createFolderResult('Folder 1999');
+  assert.equal(last.ok, true, 'the 2,000th Folder is allowed');
+  const over = FolderLibrary.createFolderResult('One too many');
+  assert.deepEqual([over.ok, over.reason], [false, 'limit']);
+  assert.match(over.message, /2,000 Folders/);
+  assert.equal(StateStore.get('folderLibrary').length, 2000, 'the refused Folder was not added');
+
+  const fresh = await freshFolderService({ folderLibrary: [folderRecord('__unfiled__', 'Looks like a token'), folderRecord(' x', 'Damaged id')] });
+  const ids = Array.from({ length: 40 }, (_, i) => fresh.FolderLibrary.createFolder(`New ${i}`).id);
+  assert.equal(new Set(ids).size, 40, 'minted ids are unique');
+  assert.ok(ids.every(id => id === id.trim() && id.length > 0 && id !== '__unfiled__'), 'and valid');
+  const src = await fs.readFile(folderLibraryPath, 'utf8');
+  assert.match(src, /function mintFolderId\(folders\)[\s\S]*?!taken\.has\(id\)[\s\S]*?return null;/,
+    'minting retries against every stored id and fails closed instead of reusing one');
+});
+
+test('Stage 1 F-08 Editor Undo and Redo are unchanged; Load Plans reaches only the Packs screen Folder steps', async () => {
+  const keyboardSrc = await fs.readFile(new URL('../../src/ui/keyboard-manager.js', import.meta.url), 'utf8');
+  const appSrc = await readAppSource();
+  const packsSrc = await fs.readFile(packsScreenPath, 'utf8');
+  const undoFn = functionBlock(keyboardSrc, 'function undo()', '\n    function redo()');
+  const redoFn = functionBlock(keyboardSrc, 'function redo()', '\n    // Escape clears');
+
+  assert.match(undoFn, /if \(!inEditor\(\)\) return Boolean\(folderHistory && folderHistory\.undo\(\)\);\s*if \(mutationBlockedWhileBusy\(\)\) return true;\s*const ok = StateStore\.undo\(\);/,
+    'in the Editor Undo is exactly what it was; elsewhere only the Folder provider may act');
+  assert.match(redoFn, /if \(!inEditor\(\)\) return Boolean\(folderHistory && folderHistory\.redo\(\)\);\s*if \(mutationBlockedWhileBusy\(\)\) return true;\s*const ok = StateStore\.redo\(\);/,
+    'the same holds for Redo');
+  assert.match(keyboardSrc, /if \(event\.defaultPrevented \|\| UIComponents\.modalOwnership\?\.blocksKeyboardEvent\(event\)\) return;\s*if \(isTypingContext\(event\)\) return;/,
+    'dialogs and text fields still own the key before any shortcut runs');
+  assert.match(appSrc, /folderHistory: \{\s*undo: \(\) => Boolean\(PacksUI && PacksUI\.undoFolderStep\(\)\),\s*redo: \(\) => Boolean\(PacksUI && PacksUI\.redoFolderStep\(\)\),/,
+    'app.js hands the keyboard manager the Packs screen provider and nothing else');
+  const step = functionBlock(packsSrc, 'function stepFolderHistory(direction)', '\n    // The stored Folder graph');
+  assert.match(step, /isScopeContextCurrent\(run\.scope\)/, 'the run is bound to the user and workspace it was made in');
+  assert.match(step, /StateStore\.get\('currentScreen'\) !== 'packs'\) return false/, 'only on the Load Plans screen');
+  assert.match(step, /StateStore\.undo\(\)[\s\S]*StateStore\.redo\(\)/, 'it uses the shared history, not a second stack');
+  assert.doesNotMatch(packsSrc, /const folderHistory(Stack|Entries)|undoStack|redoStack/, 'no second history stack exists');
 });
