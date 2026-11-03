@@ -2517,7 +2517,16 @@ const TP3D_BUILD_STAMP = Object.freeze({
       TruckChangeController,
       OperationLifecycle,
       featureFlags,
-      persistNow: () => Storage.saveNow(),
+      // An immediate save that reports its own outcome: the caller shows the one success or failure message, and the
+      // queued autosave is dropped because this write carries the same whole state.
+      persistNow: () => {
+        Storage.cancelPendingSave();
+        return Storage.saveNow({ report: false });
+      },
+      // A copy of a damaged Folder graph, kept before the explicit repair may change it. It is written only while
+      // the user and workspace the repair dialog was opened in are still the active ones.
+      preserveFolderEvidence: scope =>
+        Storage.preserveFolderGraphEvidence(StateStore.get('folderLibrary'), StateStore.get('packLibrary'), scope),
       toast,
       toAscii,
     });
@@ -2595,6 +2604,11 @@ const TP3D_BUILD_STAMP = Object.freeze({
       AppShell,
       Storage,
       Utils,
+      // Load Plans Undo/Redo reaches only the Folder steps made on that screen (the Packs screen decides).
+      folderHistory: {
+        undo: () => Boolean(PacksUI && PacksUI.undoFolderStep()),
+        redo: () => Boolean(PacksUI && PacksUI.redoFolderStep()),
+      },
     });
 
     function openExportAppModal() {

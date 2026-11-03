@@ -111,7 +111,7 @@ test('phase 0.7B-1B storage saves and loads folderLibrary only in workspace payl
   const loadStart = src.indexOf('export function load()');
   const loadEnd = src.indexOf('\nexport function saveSoon', loadStart + 1);
   const loadFn = loadStart >= 0 && loadEnd > loadStart ? src.slice(loadStart, loadEnd) : '';
-  const start = src.indexOf('export function saveNow()');
+  const start = src.indexOf('export function saveNow(');
   const end = src.indexOf('\nexport function clearAll', start + 1);
   const fn = start >= 0 && end > start ? src.slice(start, end) : '';
   const userPayloadStart = fn.indexOf('const userPayload = {');
@@ -121,8 +121,10 @@ test('phase 0.7B-1B storage saves and loads folderLibrary only in workspace payl
     : '';
 
   assert.ok(loadFn, 'load must be extractable');
-  assert.match(loadFn, /folderLibrary:[\s\S]{0,140}effectiveWorkspacePayload\.folderLibrary/,
-    'load must return folderLibrary from the effective workspace payload');
+  assert.match(loadFn, /loadedFolderLibrary =[\s\S]{0,140}effectiveWorkspacePayload\.folderLibrary/,
+    'load must take folderLibrary from the effective workspace payload');
+  assert.match(loadFn, /folderLibrary: loadedFolderLibrary,/,
+    'load must return that same folderLibrary, loaded as stored');
   assert.ok(fn, 'saveNow must be extractable');
   assert.doesNotMatch(userPayload, /folderLibrary/,
     'folderLibrary must not be saved in user-scoped preferences payload');
@@ -580,8 +582,8 @@ test('phase 0.7C-1A rejected folder chip row pattern is not present', async () =
 
 test('phase 0.7C-1A folder filtering uses pack folderId identity not folder names', async () => {
   const src = await fs.readFile(packsScreenPath, 'utf8');
-  const filterStart = src.indexOf('if (activeFolderId === null) return true;');
-  const filterEnd = src.indexOf('if (activeFolderId === UNFILED_FOLDER_ID)', filterStart);
+  const filterStart = src.indexOf('if (activeFolderId === null && activeSpecialFilter === null) return true;');
+  const filterEnd = src.indexOf('if (activeSpecialFilter === FILTER_UNFILED)', filterStart);
   const filterBlock = filterStart >= 0 && filterEnd > filterStart
     ? src.slice(filterStart, filterEnd + 140)
     : '';
@@ -602,12 +604,20 @@ test('phase 0.7C-1A active folder state updates dataset key button label and wor
 
   assert.match(src, /let activeFolderId = null/,
     'folder filter state must default to All Packs');
-  assert.match(src, /const UNFILED_FOLDER_ID = ['"]__unfiled__['"]/,
-    'folder filter must support the unfiled sentinel');
-  assert.match(src, /newDatasetKey = `\$\{q\}::\$\{sortKey\}::\$\{activeFolderId \|\| 'all'\}::/,
+  // Stage 1 F-05: Unfiled is a filter kind that lives beside activeFolderId, never a Folder id value, so a real
+  // Folder (a Workspace Backup may carry any id) can never collide with it.
+  assert.match(src, /const FILTER_UNFILED = ['"]unfiled['"]/,
+    'folder filter must support a distinct Unfiled filter kind');
+  assert.match(src, /let activeSpecialFilter = null/,
+    'special filters must live in their own state, not inside activeFolderId');
+  assert.doesNotMatch(src, /__unfiled__|UNFILED_FOLDER_ID/,
+    'no Folder id value may stand for the Unfiled filter');
+  assert.match(src, /newDatasetKey = `\$\{q\}::\$\{sortKey\}::\$\{activeSpecialFilter \? `special:\$\{activeSpecialFilter\}` : activeFolderId \? `folder:\$\{activeFolderId\}` : 'all'\}::/,
     'activeFolderId must be included in dataset key');
   assert.match(resetBlock, /activeFolderId = null/,
     'workspace reset must clear the active folder filter');
+  assert.match(resetBlock, /activeSpecialFilter = null/,
+    'workspace reset must clear the special filter');
   assert.match(src, /foldersButtonLabelEl\.textContent = label/,
     'Folders button label must reflect active folder state');
   assert.match(src, /label = ['"]Unfiled['"]/,
@@ -756,13 +766,13 @@ test('phase 0.7C-1B dropdown active rows match active folder filter state', asyn
   const end = src.indexOf('\n    function initListHeaderSort()', start + 1);
   const block = start >= 0 && end > start ? src.slice(start, end) : '';
 
-  assert.match(block, /active:\s*activeFolderId === null/,
-    'All Packs row must be active when activeFolderId is null');
-  assert.match(block, /rightIcon:\s*activeFolderId === null \? ['"]fa-solid fa-check['"]/,
+  assert.match(block, /active:\s*activeFolderId === null && activeSpecialFilter === null/,
+    'All Packs row must be active when neither a Folder nor a special filter is selected');
+  assert.match(block, /rightIcon:\s*activeFolderId === null && activeSpecialFilter === null \? ['"]fa-solid fa-check['"]/,
     'All Packs row must show active check icon when selected');
-  assert.match(block, /active:\s*activeFolderId === UNFILED_FOLDER_ID/,
-    'Unfiled row must be active when the unfiled sentinel is selected');
-  assert.match(block, /rightIcon:\s*activeFolderId === UNFILED_FOLDER_ID \? ['"]fa-solid fa-check['"]/,
+  assert.match(block, /active:\s*activeSpecialFilter === FILTER_UNFILED/,
+    'Unfiled row must be active when the Unfiled filter kind is selected');
+  assert.match(block, /rightIcon:\s*activeSpecialFilter === FILTER_UNFILED \? ['"]fa-solid fa-check['"]/,
     'Unfiled row must show active check icon when selected');
   assert.match(block, /active:\s*activeFolderId === folderId/,
     'Folder rows must be active by exact folder id match');
@@ -772,8 +782,8 @@ test('phase 0.7C-1B dropdown active rows match active folder filter state', asyn
 
 test('phase 0.7C-1B folder filtering still uses folderId state and reset behavior', async () => {
   const src = await fs.readFile(packsScreenPath, 'utf8');
-  const filterStart = src.indexOf('if (activeFolderId === null) return true;');
-  const filterEnd = src.indexOf('if (activeFolderId === UNFILED_FOLDER_ID)', filterStart);
+  const filterStart = src.indexOf('if (activeFolderId === null && activeSpecialFilter === null) return true;');
+  const filterEnd = src.indexOf('if (activeSpecialFilter === FILTER_UNFILED)', filterStart);
   const filterBlock = filterStart >= 0 && filterEnd > filterStart
     ? src.slice(filterStart, filterEnd + 140)
     : '';
@@ -787,7 +797,7 @@ test('phase 0.7C-1B folder filtering still uses folderId state and reset behavio
     'folder filtering must still use pack.folderId');
   assert.doesNotMatch(filterBlock, /folder\.name|name === activeFolderId|activeFolderId === .*name/,
     'folder filtering must not use folder names as identity');
-  assert.match(src, /newDatasetKey = `\$\{q\}::\$\{sortKey\}::\$\{activeFolderId \|\| 'all'\}::/,
+  assert.match(src, /newDatasetKey = `\$\{q\}::\$\{sortKey\}::\$\{activeSpecialFilter \? `special:\$\{activeSpecialFilter\}` : activeFolderId \? `folder:\$\{activeFolderId\}` : 'all'\}::/,
     'activeFolderId must remain in dataset key');
   assert.match(resetBlock, /activeFolderId = null/,
     'workspace reset must clear activeFolderId');
@@ -848,10 +858,14 @@ test('phase 0.7C-2 create folder uses existing modal and folder library create A
     'Create Folder must use the existing modal path');
   assert.match(block, /title:\s*['"]New Folder['"]/,
     'Create Folder modal title must be New Folder');
-  assert.match(block, /field\(['"]Folder name['"], ['"]text['"], ['"]e\.g\. Client A['"], false\)/,
-    'Create Folder modal must use field() for optional folder name input');
-  assert.match(block, /FolderLibrary\.createFolder\(folderName\)/,
-    'Create Folder modal must call FolderLibrary.createFolder()');
+  // Stage 1 name policy: the shared text field with an inline error replaces the bare field, and the service
+  // validates (trim, 1-100 code points, no case-insensitive duplicate, 2,000 Folder cap) before it writes.
+  assert.match(block, /identityField\(['"]Folder name['"], ['"]e\.g\. Client A['"]/,
+    'Create Folder modal must use the shared text field that can show a validation message');
+  assert.match(block, /FolderLibrary\.createFolderResult\(name\.input\.value\)/,
+    'Create Folder modal must call FolderLibrary.createFolderResult() with the typed name');
+  assert.match(block, /if \(!result\.ok\) \{[\s\S]{0,160}setIdentityFieldError\(name, result\.message\);[\s\S]{0,80}return false;/,
+    'a refused name shows its message and keeps the dialog open');
 });
 
 test('phase 0.7C-2 create folder selects created folder and refreshes packs', async () => {
@@ -860,16 +874,18 @@ test('phase 0.7C-2 create folder selects created folder and refreshes packs', as
   const end = src.indexOf('\n    function openFoldersDropdown()', start + 1);
   const block = start >= 0 && end > start ? src.slice(start, end) : '';
 
-  assert.match(block, /if \(created && created\.id\)/,
-    'Create Folder must guard created folder id before selecting it');
-  assert.match(block, /activeFolderId = String\(created\.id\)/,
-    'Create Folder must select the newly created folder when an id is returned');
+  assert.match(block, /if \(!result\.ok\)/,
+    'Create Folder must only select a Folder that was actually created');
+  assert.match(block, /activeFolderId = String\(result\.folder\.id\)/,
+    'Create Folder must select the newly created folder');
   assert.match(block, /packsListState\.pageIndex = 0/,
     'Create Folder must reset pack pagination when selecting the new folder');
   assert.match(block, /\brender\(\)/,
     'Create Folder must re-render the Packs screen');
-  assert.match(block, /UIComponents\.showToast\(['"]Folder created['"], ['"]success['"]\)/,
-    'Create Folder must show a success toast');
+  // Stage 1 F-04: the success toast is announced through announceFolderSave, which shows it only after the
+  // browser acknowledged the write (see the F-04 test below).
+  assert.match(block, /announceFolderSave\(saved, ['"]Folder created['"]/,
+    'Create Folder must announce its outcome after the save result is known');
 });
 
 test('phase 0.7C-2 folder dropdown includes New Folder action after filter rows', async () => {
@@ -924,8 +940,8 @@ test('phase 0.7C-2 does not add bulk sidebar or chip-row folder UI', async () =>
 
 test('phase 0.7C-2 preserves folder filtering identity and reset behavior', async () => {
   const src = await fs.readFile(packsScreenPath, 'utf8');
-  const filterStart = src.indexOf('if (activeFolderId === null) return true;');
-  const filterEnd = src.indexOf('if (activeFolderId === UNFILED_FOLDER_ID)', filterStart);
+  const filterStart = src.indexOf('if (activeFolderId === null && activeSpecialFilter === null) return true;');
+  const filterEnd = src.indexOf('if (activeSpecialFilter === FILTER_UNFILED)', filterStart);
   const filterBlock = filterStart >= 0 && filterEnd > filterStart
     ? src.slice(filterStart, filterEnd + 140)
     : '';
@@ -937,7 +953,7 @@ test('phase 0.7C-2 preserves folder filtering identity and reset behavior', asyn
     'folder filtering must still use pack.folderId');
   assert.doesNotMatch(filterBlock, /folder\.name|name === activeFolderId|activeFolderId === .*name/,
     'folder filtering must not use folder names as identity');
-  assert.match(src, /newDatasetKey = `\$\{q\}::\$\{sortKey\}::\$\{activeFolderId \|\| 'all'\}::/,
+  assert.match(src, /newDatasetKey = `\$\{q\}::\$\{sortKey\}::\$\{activeSpecialFilter \? `special:\$\{activeSpecialFilter\}` : activeFolderId \? `folder:\$\{activeFolderId\}` : 'all'\}::/,
     'activeFolderId must remain in dataset key');
   assert.match(resetBlock, /activeFolderId = null/,
     'workspace reset must clear activeFolderId');
@@ -955,8 +971,8 @@ test('phase 0.7C-3 move modal uses folder library move API', async () => {
     'openMoveToFolderModal(pack) helper must exist');
   assert.match(block, /UIComponents\.showModal\(/,
     'Move to Folder must use the existing modal path');
-  assert.match(block, /FolderLibrary\.movePackToFolder\(pack\.id, folderIdOrNull\)/,
-    'move helper must call FolderLibrary.movePackToFolder with pack id and target folder id');
+  assert.match(block, /FolderLibrary\.movePackToFolderResult\(pack\.id, folderIdOrNull\)/,
+    'move helper must call FolderLibrary.movePackToFolderResult with pack id and target folder id');
   assert.match(block, /const folders = getSafeFolders\(\)/,
     'move helper must use folder options from the existing safe folder list');
   assert.match(src, /FolderLibrary\.listFolders\(\)/,
@@ -989,14 +1005,14 @@ test('phase 0.7C-3 move helper handles success and failed moves safely', async (
   const end = src.indexOf('\n    function openMoveToFolderModal(pack)', start + 1);
   const block = start >= 0 && end > start ? src.slice(start, end) : '';
 
-  assert.match(block, /if \(!moved\)[\s\S]{0,120}UIComponents\.showToast\(['"]Could not move load plan to folder['"], ['"]warning['"]\)/,
+  assert.match(block, /if \(!result\.ok\)[\s\S]{0,120}UIComponents\.showToast\(['"]Could not move load plan to folder['"], ['"]warning['"]\)/,
     'failed move must show a warning toast and not throw');
   assert.match(block, /packsListState\.pageIndex = 0/,
     'successful move must reset pack pagination');
   assert.match(block, /\brender\(\)/,
     'successful move must re-render Packs screen');
-  assert.match(block, /UIComponents\.showToast\([\s\S]{0,120}['"]success['"]\)/,
-    'successful move must show success toast');
+  assert.match(block, /announceFolderSave\(saved, [\s\S]{0,120}Load plan moved to/,
+    'successful move must announce its outcome after the save result is known');
   assert.match(block, /return true/,
     'successful move must report success to modal row handlers');
 });
@@ -1060,16 +1076,16 @@ test('phase 0.7C-4 rename folder uses existing modal and folder library rename A
     'Rename Folder must use the existing modal path');
   assert.match(block, /title:\s*['"]Rename Folder['"]/,
     'Rename Folder modal title must be Rename Folder');
-  assert.match(block, /field\(['"]Folder name['"], ['"]text['"], ['"]e\.g\. Client A['"], false\)/,
-    'Rename Folder modal must use field() for optional folder name input');
+  assert.match(block, /identityField\(['"]Folder name['"], ['"]e\.g\. Client A['"]/,
+    'Rename Folder modal must use the shared text field that can show a validation message');
   assert.match(block, /name\.input\.value = folder\.name \|\| ['"]/,
     'Rename Folder modal must pre-fill the current folder name');
-  assert.match(block, /FolderLibrary\.renameFolder\(folderId, name\.input\.value\)/,
-    'Rename Folder must call FolderLibrary.renameFolder with folder id and input value');
+  assert.match(block, /FolderLibrary\.renameFolderResult\(folderId, name\.input\.value\)/,
+    'Rename Folder must call FolderLibrary.renameFolderResult with folder id and input value');
   assert.match(block, /\brender\(\)/,
     'Rename Folder must refresh the Packs screen through render()');
-  assert.match(block, /UIComponents\.showToast\(['"]Folder renamed['"], ['"]success['"]\)/,
-    'Rename Folder must show a success toast');
+  assert.match(block, /announceFolderSave\(saved, ['"]Folder renamed['"]/,
+    'Rename Folder must announce its outcome after the save result is known');
 });
 
 test('phase 0.7C-4 delete folder uses confirm and preserves packs', async () => {
@@ -1108,8 +1124,8 @@ test('phase 0.7C-4 delete active folder clears active filter and resets paginati
     'Deleting the active folder must reset pack pagination');
   assert.match(block, /\brender\(\)/,
     'Deleting a folder must refresh the Packs screen');
-  assert.match(block, /UIComponents\.showToast\(['"]Folder deleted['"], ['"]success['"]\)/,
-    'Deleting a folder must show a success toast');
+  assert.match(block, /announceFolderSave\(saved, ['"]Folder deleted['"]/,
+    'Deleting a folder must announce its outcome after the save result is known');
 });
 
 test('phase 0.7C-4 Folders dropdown exposes rename delete only for active real folder', async () => {
@@ -1176,17 +1192,17 @@ test('phase 0.7C-4B folder mutations flush workspace persistence immediately', a
   const moveEnd = packsSrc.indexOf('\n    function openMoveToFolderModal(pack)', moveStart + 1);
   const moveBlock = moveStart >= 0 && moveEnd > moveStart ? packsSrc.slice(moveStart, moveEnd) : '';
 
-  assert.match(appSrc, /persistNow:\s*\(\) => Storage\.saveNow\(\)/,
-    'app.js must pass an immediate workspace save callback into the Packs screen');
+  assert.match(appSrc, /persistNow:\s*\(\) => \{[\s\S]{0,40}Storage\.cancelPendingSave\(\);[\s\S]{0,40}return Storage\.saveNow\(\{ report: false \}\);/,
+    'app.js must pass an immediate workspace save callback that returns the save outcome into the Packs screen');
   assert.match(packsSrc, /function persistFolderStateNow\(\)[\s\S]{0,180}persistNow\(\)/,
     'Packs screen must expose a narrow immediate persistence helper');
-  assert.match(createBlock, /FolderLibrary\.createFolder\(folderName\)[\s\S]{0,80}persistFolderStateNow\(\)/,
+  assert.match(createBlock, /FolderLibrary\.createFolderResult\(name\.input\.value\)[\s\S]{0,400}persistFolderStateNow\(\)/,
     'Create Folder must flush persistence immediately after StateStore mutation');
-  assert.match(renameBlock, /FolderLibrary\.renameFolder\(folderId, name\.input\.value\)[\s\S]{0,180}persistFolderStateNow\(\)/,
+  assert.match(renameBlock, /FolderLibrary\.renameFolderResult\(folderId, name\.input\.value\)[\s\S]{0,700}persistFolderStateNow\(\)/,
     'Rename Folder must flush persistence immediately after StateStore mutation');
   assert.match(deleteBlock, /FolderLibrary\.deleteFolder\(folderId\)[\s\S]{0,180}persistFolderStateNow\(\)/,
     'Delete Folder must flush persistence immediately after StateStore mutation');
-  assert.match(moveBlock, /FolderLibrary\.movePackToFolder\(pack\.id, folderIdOrNull\)[\s\S]{0,180}persistFolderStateNow\(\)/,
+  assert.match(moveBlock, /FolderLibrary\.movePackToFolderResult\(pack\.id, folderIdOrNull\)[\s\S]{0,420}persistFolderStateNow\(\)/,
     'Move Pack to Folder must flush persistence immediately after StateStore mutation');
 });
 
@@ -1233,19 +1249,19 @@ test('phase 0.7C-4B both pack menus contain one compact Move to Folder action', 
 
 test('phase 0.7C-4B folder CRUD and move APIs remain wired from Packs screen only', async () => {
   const src = await fs.readFile(packsScreenPath, 'utf8');
-  const { stdout } = await execFileAsync('git', ['grep', '-n', 'FolderLibrary.movePackToFolder(', '--', 'src']);
+  const { stdout } = await execFileAsync('git', ['grep', '-n', 'FolderLibrary.movePackToFolderResult(', '--', 'src']);
   const callers = stdout
     .split('\n')
     .map(line => line.trim())
     .filter(Boolean);
 
   assert.ok(callers.length >= 1,
-    'FolderLibrary.movePackToFolder must be called from source');
+    'FolderLibrary.movePackToFolderResult must be called from source');
   assert.ok(callers.every(line => line.startsWith('src/screens/packs-screen.js:')),
-    'FolderLibrary.movePackToFolder must only be called by the Packs screen UI');
-  assert.match(src, /FolderLibrary\.createFolder\(folderName\)/,
+    'FolderLibrary.movePackToFolderResult must only be called by the Packs screen UI');
+  assert.match(src, /FolderLibrary\.createFolderResult\(name\.input\.value\)/,
     'Create Folder must remain wired');
-  assert.match(src, /FolderLibrary\.renameFolder\(folderId, name\.input\.value\)/,
+  assert.match(src, /FolderLibrary\.renameFolderResult\(folderId, name\.input\.value\)/,
     'Rename Folder must remain wired');
   assert.match(src, /FolderLibrary\.deleteFolder\(folderId\)/,
     'Delete Folder must remain wired');
@@ -1266,4 +1282,752 @@ test('phase 0.7C-4B rename delete stay guarded to active real folders only', asy
     'Rename Folder action must target the active real folder');
   assert.match(actionsBlock, /deleteFolderWithConfirm\(model\.activeFolder\)/,
     'Delete Folder action must target the active real folder');
+});
+
+// ── Folder Foundation Stage 1 ───────────────────────────────────────────────────────────────
+const uiComponentsPath = new URL('../../src/ui/ui-components.js', import.meta.url);
+
+function functionBlock(src, header, nextHeader) {
+  const start = src.indexOf(header);
+  const end = src.indexOf(nextHeader, start + header.length);
+  return start >= 0 && end > start ? src.slice(start, end) : '';
+}
+
+test('Stage 1 F-01 the delete confirmation shows the Folder name through textContent, not an HTML string', async () => {
+  const packsSrc = await fs.readFile(packsScreenPath, 'utf8');
+  const uiSrc = await fs.readFile(uiComponentsPath, 'utf8');
+  const block = functionBlock(packsSrc, 'async function deleteFolderWithConfirm(folder)', '\n    function movePackToFolder(');
+
+  assert.ok(block.length > 0, 'the delete confirmation must stay discoverable');
+  assert.match(block, /const message = document\.createElement\('div'\);\s*message\.textContent =/,
+    'the message must be an element filled through textContent');
+  assert.match(block, /UIComponents\.confirm\(\{[\s\S]*?\n\s+message,\n/,
+    'confirm must receive the element, not a template string');
+  assert.doesNotMatch(block, /message:\s*`/,
+    'a Folder name must never be interpolated into a string message (the modal treats strings as HTML)');
+  assert.match(uiSrc, /SECURITY: Treat string content as trusted HTML only/,
+    'the shared modal string contract stays unchanged for its trusted-markup callers');
+});
+
+test('Stage 1 F-02 every Folder dialog binds to its scope and re-checks it before it writes', async () => {
+  const src = await fs.readFile(packsScreenPath, 'utf8');
+  const cases = [
+    ['create', 'function openCreateFolderModal()', 'FolderLibrary.createFolderResult('],
+    ['rename', 'function openRenameFolderModal(folder)', 'FolderLibrary.renameFolderResult('],
+    ['delete', 'async function deleteFolderWithConfirm(folder)', 'FolderLibrary.deleteFolder('],
+    ['move', 'function openMoveToFolderModal(pack)', 'movePackToFolder(pack, folderIdOrNull)'],
+  ];
+  cases.forEach(([name, header, write]) => {
+    const start = src.indexOf(header);
+    const body = src.slice(start, src.indexOf('\n    function ', start + header.length) > 0
+      ? src.indexOf('\n    function ', start + header.length) : undefined);
+    assert.ok(start >= 0, `${name} dialog must exist`);
+    assert.match(body, /beginFolderDialog\(\)/, `${name} dialog must capture its scope when it opens`);
+    const guardAt = body.search(/folderDialogIsCurrent\(guard\)/);
+    const writeAt = body.indexOf(write);
+    assert.ok(guardAt >= 0 && writeAt >= 0 && guardAt < writeAt,
+      `${name} dialog must re-validate its scope before it writes`);
+  });
+  assert.match(src, /isCurrent: \(\) => isScopeContextCurrent\(scope\) && epoch === folderStateEpoch/,
+    'the guard uses the storage scope generation, so A to B to A is a different identity');
+  assert.match(src, /if \(changes && changes\._replace\) folderStateEpoch \+= 1;[\s\S]{0,600}dismissFolderDialogs\(\);/,
+    'a whole-state replacement invalidates and dismisses open dialogs');
+  assert.match(src, /function resetWorkspaceState\(\) \{\s*dismissFolderDialogs\(\{ all: true \}\);/,
+    'a workspace reset dismisses every open Folder dialog');
+});
+
+function makeFlakyLocalStorage() {
+  const values = new Map();
+  const storage = {
+    failWrites: false,
+    get length() { return values.size; },
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) {
+      if (storage.failWrites) {
+        const err = new Error('The quota has been exceeded.');
+        err.name = 'QuotaExceededError';
+        throw err;
+      }
+      values.set(key, String(value));
+    },
+    removeItem(key) { values.delete(key); },
+    key(index) { return Array.from(values.keys())[index] || null; },
+  };
+  return storage;
+}
+
+test('Stage 1 F-04 saveNow reports whether the browser accepted the write and keeps unsaved state for a retry', async () => {
+  const Storage = await import(`${storagePath.href}?f04=${Date.now()}-${Math.random()}`);
+  const StateStore = await import(stateStorePath.href);
+  const Events = await import(new URL('../../src/core/events.js', import.meta.url).href);
+  const originalWindow = globalThis.window;
+  const localStorage = makeFlakyLocalStorage();
+  const saveErrors = [];
+  const off = Events.on('storage:save_error', payload => saveErrors.push(payload));
+  const workspaceKey = 'truckPacker3d:v1:user-f04:workspace:org-f04';
+
+  try {
+    globalThis.window = { localStorage };
+    Storage.setStorageScope('user-f04');
+    Storage.setWorkspaceScope('org-f04');
+    StateStore.init({
+      caseLibrary: [],
+      packLibrary: [],
+      folderLibrary: [{ id: 'f-1', name: 'Client A', scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1 }],
+      preferences: {},
+    });
+
+    const accepted = Storage.saveNow({ report: false });
+    assert.equal(accepted.ok, true, 'an accepted write reports ok');
+    assert.equal(typeof accepted.savedAt, 'number');
+    assert.equal(JSON.parse(localStorage.getItem(workspaceKey)).folderLibrary[0].id, 'f-1');
+
+    // A failed write that the caller reports itself raises no second, generic message.
+    localStorage.failWrites = true;
+    StateStore.set({ folderLibrary: [...StateStore.get('folderLibrary'), { id: 'f-2', name: 'Client B', scope: 'pack', parentFolderId: null, sortOrder: 1, createdAt: 2, updatedAt: 2 }] });
+    const refused = Storage.saveNow({ report: false });
+    assert.equal(refused.ok, false, 'a refused write is not reported as saved');
+    assert.equal(saveErrors.length, 0, 'the caller that passed report:false is the only one to speak');
+    assert.equal(JSON.parse(localStorage.getItem(workspaceKey)).folderLibrary.length, 1,
+      'the durable copy still holds the last accepted state');
+    assert.equal(StateStore.get('folderLibrary').length, 2, 'the unsaved change stays in memory for the retry');
+
+    // The default call keeps the global failure message for every unrelated save (autosave and others).
+    const defaultFail = Storage.saveNow();
+    assert.equal(defaultFail.ok, false);
+    assert.equal(saveErrors.length, 1, 'autosave and other callers keep their existing failure message');
+
+    // The retry writes the kept state and reports success.
+    localStorage.failWrites = false;
+    const retried = Storage.saveNow({ report: false });
+    assert.equal(retried.ok, true, 'a later retry reports success');
+    assert.deepEqual(JSON.parse(localStorage.getItem(workspaceKey)).folderLibrary.map(f => f.id), ['f-1', 'f-2']);
+    assert.equal(saveErrors.length, 1, 'the successful retry raises no failure message');
+  } finally {
+    off();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test('Stage 1 F-04 the Folder UI announces success only after an acknowledged save and fails closed otherwise', async () => {
+  const src = await fs.readFile(packsScreenPath, 'utf8');
+  const persist = functionBlock(src, 'function persistFolderStateNow()', '\n    // A Folder dialog');
+  const announce = functionBlock(src, 'function announceFolderSave(', '\n    function getFolderFilterModel');
+
+  assert.match(persist, /return result && result\.ok === true \? result : \{ ok: false \}/,
+    'anything but an explicit acknowledgement counts as not saved');
+  assert.match(persist, /typeof persistNow !== 'function'\) return \{ ok: false \}/,
+    'a missing save callback cannot claim success');
+  assert.match(persist, /catch \(error\) \{\s*return \{ ok: false, error \};/,
+    'a throwing save is a failed save');
+  const successAt = announce.indexOf("showToast(successMessage, 'success')");
+  const guardAt = announce.indexOf('if (saved && saved.ok)');
+  const failureAt = announce.indexOf("'error'");
+  assert.ok(guardAt >= 0 && successAt > guardAt && failureAt > successAt,
+    'the success toast sits only inside the acknowledged branch; the failure is one error toast');
+  assert.match(announce, /label: 'Retry'[\s\S]*?folderDialogIsCurrent\(guard\)[\s\S]*?persistFolderStateNow\(\)/,
+    'Retry is bound to the workspace it was raised in and saves again');
+  ['Folder created', 'Folder renamed', 'Folder deleted'].forEach(label => {
+    assert.doesNotMatch(src, new RegExp(`showToast\\('${label}', 'success'\\)`),
+      `${label} is announced through announceFolderSave, never straight after the mutation`);
+  });
+});
+
+function damagedFolderGraphFixture() {
+  const folder = (id, name, extra = {}) => ({ id, name, scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1, ...extra });
+  return {
+    folderLibrary: [
+      folder('f-good', 'Good'),
+      folder('f-dup', 'Dup first'),
+      folder('f-dup', 'Dup second'),
+      null,
+      folder(' padded', 'Padded id'),
+      folder('f-nested', 'Nested', { parentFolderId: 'f-good' }),
+    ],
+    packLibrary: [
+      { id: 'p-ok', title: 'OK', folderId: 'f-good', lastEdited: 5 },
+      { id: 'p-unfiled', title: 'Unfiled', folderId: null, lastEdited: 5 },
+      { id: 'p-ghost', title: 'Ghost', folderId: 'f-gone', lastEdited: 5 },
+      { id: 'p-dup', title: 'Dup', folderId: 'f-dup', lastEdited: 5 },
+      { id: 'p-typed', title: 'Typed', folderId: 42, lastEdited: 5 },
+      { id: 'p-nested', title: 'Nested', folderId: 'f-nested', lastEdited: 5 },
+    ],
+  };
+}
+
+test('Stage 1 F-03 inspectFolderGraph reports damage with the strict validator rules and changes nothing', async () => {
+  const { inspectFolderGraph } = await import(`${normalizerPath.href}?f03=${Date.now()}-${Math.random()}`);
+  const fixture = damagedFolderGraphFixture();
+  const before = JSON.stringify(fixture);
+  const graph = inspectFolderGraph(fixture.folderLibrary, fixture.packLibrary);
+
+  assert.equal(JSON.stringify(fixture), before, 'inspection is read-only');
+  assert.deepEqual(graph.folders.map(f => f.id), ['f-good', 'f-nested'],
+    'only unique, valid ids are usable (a nested record stays usable and is reported)');
+  assert.deepEqual(graph.issues.map(i => i.kind).sort(), ['duplicate-id', 'duplicate-id', 'invalid-id', 'nested', 'not-a-record'].sort());
+  assert.deepEqual(graph.ambiguousIds, ['f-dup']);
+  assert.deepEqual(
+    graph.unresolved.map(u => [u.packId, u.reason]),
+    [['p-ghost', 'missing'], ['p-dup', 'ambiguous'], ['p-typed', 'invalid']],
+    'every Load Plan whose Folder cannot be used is listed with its reason'
+  );
+  assert.equal(graph.clean, false);
+  assert.equal(inspectFolderGraph(
+    [{ id: 'a', name: 'A', scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1 }],
+    [{ id: 'p', folderId: 'a' }, { id: 'q', folderId: null }, { id: 'r' }, { id: 's', folderId: '' }]
+  ).clean, true, 'a valid graph, including blank and missing folderId, is clean');
+});
+
+test('Stage 1 F-03 Folder operations refuse ambiguous targets, keep every record and keep valid Folders usable', async () => {
+  const StateStore = await import(stateStorePath.href);
+  const FolderLibrary = await import(`${folderLibraryPath.href}?f03=${Date.now()}-${Math.random()}`);
+  const fixture = damagedFolderGraphFixture();
+  StateStore.init({ caseLibrary: [], packLibrary: fixture.packLibrary, folderLibrary: fixture.folderLibrary, preferences: {} });
+  const stored = () => JSON.stringify([StateStore.get('folderLibrary'), StateStore.get('packLibrary')]);
+  const before = stored();
+
+  assert.deepEqual(FolderLibrary.listFolders().map(f => f.id), ['f-good', 'f-nested'],
+    'the Folder list shows usable Folders only');
+  assert.equal(FolderLibrary.renameFolder('f-dup', 'Renamed'), null, 'an ambiguous Folder cannot be renamed');
+  assert.equal(FolderLibrary.deleteFolder('f-dup'), false, 'an ambiguous Folder cannot be deleted');
+  assert.equal(FolderLibrary.movePackToFolder('p-ok', 'f-dup'), null, 'a Load Plan cannot be moved into an ambiguous Folder');
+  assert.equal(FolderLibrary.movePackToFolder('p-ok', 'f-gone'), null, 'nor into a Folder that does not exist');
+  assert.equal(stored(), before, 'a refused operation changes nothing and writes no history');
+
+  const renamed = FolderLibrary.renameFolder('f-good', 'Good renamed');
+  assert.equal(renamed.name, 'Good renamed', 'a valid Folder stays fully usable beside the damaged ones');
+  const moved = FolderLibrary.movePackToFolder('p-ghost', null);
+  assert.equal(moved.folderId, null, 'an unresolved Load Plan can be moved to Unfiled explicitly');
+  assert.equal(StateStore.get('folderLibrary').filter(f => f && f.id === 'f-dup').length, 2,
+    'both records that share an id are still stored');
+  assert.equal(StateStore.get('packLibrary').find(p => p.id === 'p-dup').folderId, 'f-dup',
+    'a Load Plan that points at an ambiguous id keeps it until the explicit repair');
+});
+
+test('Stage 1 F-03 the explicit repair keeps Load Plans and cargo, uses the restore rules and is one history step', async () => {
+  const StateStore = await import(stateStorePath.href);
+  const originalWindow = globalThis.window;
+  globalThis.window = { crypto: globalThis.crypto };
+  try {
+    const FolderLibrary = await import(`${folderLibraryPath.href}?f03r=${Date.now()}-${Math.random()}`);
+    const fixture = damagedFolderGraphFixture();
+    fixture.packLibrary[0].cases = [{ id: 'i1', caseId: 'c1' }];
+    StateStore.init({ caseLibrary: [], packLibrary: fixture.packLibrary, folderLibrary: fixture.folderLibrary, preferences: {} });
+    const depth = StateStore.undoDepth();
+
+    const repaired = FolderLibrary.repairFolderGraph();
+    assert.ok(repaired, 'a damaged graph is repaired');
+    assert.equal(StateStore.undoDepth() - depth, 1, 'one history step');
+    const graph = FolderLibrary.getFolderGraph();
+    assert.equal(graph.clean, true, 'the repaired graph passes the same inspection');
+    const packs = StateStore.get('packLibrary');
+    assert.equal(packs.length, fixture.packLibrary.length, 'no Load Plan is removed');
+    assert.deepEqual(packs.find(p => p.id === 'p-ok').cases, [{ id: 'i1', caseId: 'c1' }], 'cargo is untouched');
+    assert.ok(packs.every(p => p.lastEdited === 5), 'a repair is not an edit: lastEdited is unchanged');
+    assert.equal(packs.find(p => p.id === 'p-ghost').folderId, null, 'a Load Plan that pointed nowhere is Unfiled');
+    assert.equal(packs.find(p => p.id === 'p-ok').folderId, 'f-good', 'a valid assignment is untouched');
+    assert.equal(packs.find(p => p.id === 'p-dup').folderId, null,
+      'a Load Plan that pointed at a repeated id is Unfiled: the app cannot tell which Folder it was in, so it never guesses');
+    const names = StateStore.get('folderLibrary').map(f => f.name);
+    assert.ok(names.includes('Dup first') && names.includes('Dup second'), 'both records that shared an id survive');
+    assert.equal(new Set(StateStore.get('folderLibrary').map(f => f.id)).size, StateStore.get('folderLibrary').length,
+      'every Folder id is unique afterwards');
+    assert.equal(FolderLibrary.repairFolderGraph(), null, 'a clean graph needs no repair');
+
+    StateStore.undo();
+    assert.equal(FolderLibrary.getFolderGraph().clean, false, 'Undo returns the original graph');
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test('Stage 1 D1 repair never guesses: a Load Plan on a repeated Folder id is Unfiled whatever order the Folders are stored in', async () => {
+  const { repairFolderGraph } = await import(`${normalizerPath.href}?d1=${Date.now()}-${Math.random()}`);
+  const originalWindow = globalThis.window;
+  globalThis.window = { crypto: globalThis.crypto };
+  try {
+    const rich = { id: 'p-dup', title: 'Dup', folderId: 'f-dup', lastEdited: 5, cases: [{ id: 'i1', caseId: 'c1' }], annotations: [{ id: 'a1' }], measurements: [{ id: 'm1' }] };
+    const folder = (id, name) => ({ id, name, scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1 });
+    const folders = [folder('f-good', 'Good'), folder('f-dup', 'Dup first'), folder('f-dup', 'Dup second')];
+    const packs = [{ id: 'p-ok', folderId: 'f-good', lastEdited: 5 }, rich, { id: 'p-ghost', folderId: 'f-gone', lastEdited: 5 }];
+    const swapped = [folders[0], folders[2], folders[1]];
+    const assignments = result => result.packLibrary.map(pack => [pack.id, pack.folderId]);
+
+    const forward = repairFolderGraph(folders, packs, 99);
+    const reversed = repairFolderGraph(swapped, packs, 99);
+    assert.deepEqual(assignments(forward), [['p-ok', 'f-good'], ['p-dup', null], ['p-ghost', null]]);
+    assert.deepEqual(assignments(reversed), assignments(forward), 'swapping the repeated Folders changes no assignment');
+
+    const repairedDup = forward.packLibrary.find(pack => pack.id === 'p-dup');
+    assert.deepEqual({ ...repairedDup, folderId: 'f-dup' }, rich, 'only folderId changes: identity, cargo, annotations, measurements and lastEdited stay');
+    assert.equal(forward.packLibrary.find(pack => pack.id === 'p-ok'), packs[0], 'a valid assignment is returned untouched (same object)');
+    [forward, reversed].forEach(result => {
+      assert.deepEqual(result.folderLibrary.map(f => f.name).sort(), ['Dup first', 'Dup second', 'Good'], 'every Folder survives');
+      assert.equal(new Set(result.folderLibrary.map(f => f.id)).size, 3, 'every Folder id is unique afterwards');
+    });
+    assert.equal(JSON.stringify(packs[1]), JSON.stringify(rich), 'the input Load Plans are not mutated');
+
+    // Ids that only collide once they are normalized (a padded id beside the same id) are ambiguous too.
+    const padded = [folder(' f-x', 'Padded'), folder('f-x', 'Exact')];
+    const refs = [{ id: 'p-x', folderId: 'f-x', lastEdited: 5 }];
+    assert.equal(repairFolderGraph(padded, refs, 99).packLibrary[0].folderId, null);
+    assert.equal(repairFolderGraph([padded[1], padded[0]], refs, 99).packLibrary[0].folderId, null);
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test('Stage 1 F-03 load keeps a damaged Folder graph as stored and preserves the original once', async () => {
+  const Storage = await import(`${storagePath.href}?f03=${Date.now()}-${Math.random()}`);
+  const originalWindow = globalThis.window;
+  const localStorage = makeFlakyLocalStorage();
+  const fixture = damagedFolderGraphFixture();
+  const workspaceKey = 'truckPacker3d:v1:user-f03:workspace:org-f03';
+  const evidenceKey = `${workspaceKey}:folder-graph-evidence`;
+  const writeErrors = [];
+  const Events = await import(new URL('../../src/core/events.js', import.meta.url).href);
+  const off = Events.on('storage:write_error', payload => writeErrors.push(payload));
+  const payload = extra => JSON.stringify({
+    version: 'test', savedAt: 1, caseLibrary: [], packLibrary: fixture.packLibrary, folderLibrary: fixture.folderLibrary,
+    currentPackId: null, ...extra,
+  });
+
+  try {
+    globalThis.window = { localStorage };
+    Storage.setStorageScope('user-f03');
+    Storage.setWorkspaceScope('org-f03');
+    localStorage.setItem('truckPacker3d:v1:user-f03', JSON.stringify({ version: 'test', savedAt: 1, preferences: {} }));
+    localStorage.setItem(workspaceKey, payload());
+
+    const loaded = Storage.load();
+    assert.deepEqual(loaded.folderLibrary, fixture.folderLibrary, 'the damaged Folder records load exactly as stored');
+    assert.deepEqual(loaded.packLibrary.map(p => p.folderId), fixture.packLibrary.map(p => p.folderId),
+      'every Load Plan keeps its stored folderId');
+    const evidence = JSON.parse(localStorage.getItem(evidenceKey));
+    assert.deepEqual(evidence.folderLibrary, fixture.folderLibrary, 'the original Folder records are kept');
+    assert.deepEqual(evidence.packFolderRefs.map(r => r.id), ['p-ok', 'p-ghost', 'p-dup', 'p-typed', 'p-nested'],
+      'the original assignments are kept');
+    const firstRaw = localStorage.getItem(evidenceKey);
+
+    Storage.load();
+    assert.equal(localStorage.getItem(evidenceKey), firstRaw, 'reloading the same damaged data adds no second copy');
+
+    localStorage.setItem(workspaceKey, payload({ folderLibrary: [] }));
+    Storage.load();
+    const afterSecond = JSON.parse(localStorage.getItem(evidenceKey));
+    assert.deepEqual(afterSecond.folderLibrary, fixture.folderLibrary, 'the first copy is never overwritten');
+    assert.equal(afterSecond.laterRecords.length, 1, 'a different damaged state is kept beside it');
+
+    const cleanKey = 'truckPacker3d:v1:user-f03:workspace:org-clean';
+    Storage.setWorkspaceScope('org-clean');
+    localStorage.setItem(cleanKey, payload({ folderLibrary: [], packLibrary: [] }));
+    Storage.load();
+    assert.equal(localStorage.getItem(`${cleanKey}:folder-graph-evidence`), null, 'a clean workspace writes no evidence');
+
+    // A refused evidence write is reported, never swallowed, and does not stop the load.
+    Storage.setWorkspaceScope('org-full');
+    localStorage.setItem('truckPacker3d:v1:user-f03:workspace:org-full', payload());
+    localStorage.failWrites = true;
+    const stillLoaded = Storage.load();
+    assert.equal(stillLoaded.folderLibrary.length, fixture.folderLibrary.length, 'the load still succeeds');
+    assert.equal(writeErrors.filter(e => /damaged Folder data/.test(e.message)).length, 1,
+      'the missing evidence copy is reported');
+  } finally {
+    off();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+// ---- Folder repair evidence: every distinct damaged graph is kept, within a limit, and a refusal blocks the repair ----
+
+async function withEvidenceStorage(tag, run) {
+  const Storage = await import(`${storagePath.href}?${tag}=${Date.now()}-${Math.random()}`);
+  const originalWindow = globalThis.window;
+  const localStorage = makeFlakyLocalStorage();
+  globalThis.window = { localStorage };
+  Storage.setStorageScope('user-ev');
+  Storage.setWorkspaceScope('org-a');
+  const evidenceKey = org => `truckPacker3d:v1:user-ev:workspace:${org}:folder-graph-evidence`;
+  try {
+    await run({ Storage, localStorage, evidenceKey });
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+}
+
+// A damaged graph (two Folders sharing an id, and a Load Plan pointing at it); `tag` makes each episode different.
+function evidenceEpisode(tag) {
+  const folder = name => ({ id: `f-${tag}`, name, scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1 });
+  return { folders: [folder(`${tag} one`), folder(`${tag} two`)], packs: [{ id: `p-${tag}`, title: 'Plan', folderId: `f-${tag}` }] };
+}
+
+test('Stage 1 evidence: the first episode is kept, a different one is kept beside it and an identical one adds nothing', async () => {
+  await withEvidenceStorage('ev1', async ({ Storage, localStorage, evidenceKey }) => {
+    const [e1, e2, e3] = ['a', 'b', 'c'].map(evidenceEpisode);
+    const key = evidenceKey('org-a');
+    const read = () => JSON.parse(localStorage.getItem(key));
+
+    const first = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs);
+    assert.deepEqual([first.ok, first.records], [true, 1], 'the first episode is stored');
+    assert.deepEqual(read().folderLibrary, e1.folders);
+    assert.deepEqual(read().packFolderRefs, [{ id: 'p-a', folderId: 'f-a' }]);
+    assert.equal(read().laterRecords, undefined, 'a single episode is the original single-record format');
+
+    const reordered = e1.folders.map(f => Object.fromEntries(Object.entries(f).reverse()));
+    const rawBefore = localStorage.getItem(key);
+    const again = Storage.preserveFolderGraphEvidence(reordered, e1.packs);
+    assert.deepEqual([again.ok, again.existing, again.records], [true, true, 1], 'the same data (any key order) is already kept');
+    assert.equal(localStorage.getItem(key), rawBefore, 'an identical episode writes nothing');
+
+    const second = Storage.preserveFolderGraphEvidence(e2.folders, e2.packs);
+    assert.deepEqual([second.ok, second.records], [true, 2], 'a different second episode is also kept');
+    assert.deepEqual(read().folderLibrary, e1.folders, 'the first episode is untouched at the top level');
+    assert.deepEqual(read().laterRecords.map(r => r.folderLibrary), [e2.folders]);
+    assert.deepEqual(read().laterRecords[0].packFolderRefs, [{ id: 'p-b', folderId: 'f-b' }]);
+
+    const afterSecond = localStorage.getItem(key);
+    assert.equal(Storage.preserveFolderGraphEvidence(e2.folders, e2.packs).existing, true, 'repeating the second episode adds nothing');
+    assert.equal(Storage.preserveFolderGraphEvidence(e1.folders, e1.packs).existing, true, 'repeating the first episode adds nothing');
+    assert.equal(localStorage.getItem(key), afterSecond);
+
+    assert.equal(Storage.preserveFolderGraphEvidence(e3.folders, e3.packs).records, 3, 'a third distinct episode is kept too');
+    assert.deepEqual(read().laterRecords.map(r => r.folderLibrary), [e2.folders, e3.folders]);
+  });
+});
+
+test('Stage 1 evidence: a single-record copy made before this change stays readable and untouched', async () => {
+  await withEvidenceStorage('ev2', async ({ Storage, localStorage, evidenceKey }) => {
+    const [e1, e2] = ['a', 'b'].map(evidenceEpisode);
+    const key = evidenceKey('org-a');
+    const original = JSON.stringify({
+      kind: 'folder-graph-evidence', version: 1, capturedAt: 111, folderLibrary: e1.folders,
+      packFolderRefs: [{ id: 'p-a', folderId: 'f-a' }],
+    });
+    localStorage.setItem(key, original);
+
+    const same = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs);
+    assert.deepEqual([same.ok, same.existing, same.records], [true, true, 1], 'the old copy counts as the first episode');
+    assert.equal(localStorage.getItem(key), original, 'it is not rewritten');
+
+    const added = Storage.preserveFolderGraphEvidence(e2.folders, e2.packs);
+    assert.deepEqual([added.ok, added.records], [true, 2]);
+    const parsed = JSON.parse(localStorage.getItem(key));
+    // A reader that only knows the single-record format still reads the original episode, field for field.
+    assert.deepEqual(
+      [parsed.kind, parsed.version, parsed.capturedAt, parsed.folderLibrary, parsed.packFolderRefs],
+      ['folder-graph-evidence', 1, 111, e1.folders, [{ id: 'p-a', folderId: 'f-a' }]]
+    );
+    assert.equal(parsed.laterRecords.length, 1);
+  });
+});
+
+test('Stage 1 evidence: a refused write keeps what is stored, reports it, and the repair flow stops before it changes anything', async () => {
+  await withEvidenceStorage('ev3', async ({ Storage, localStorage, evidenceKey }) => {
+    const [e1, e2] = ['a', 'b'].map(evidenceEpisode);
+    const key = evidenceKey('org-a');
+    const workspaceKey = 'truckPacker3d:v1:user-ev:workspace:org-a';
+    localStorage.setItem(workspaceKey, JSON.stringify({ folderLibrary: e2.folders, packLibrary: e2.packs }));
+    const workspaceBefore = localStorage.getItem(workspaceKey);
+    const graphBefore = JSON.stringify([e2.folders, e2.packs]);
+
+    localStorage.failWrites = true;
+    const none = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs);
+    assert.deepEqual([none.ok, none.reason], [false, 'storage'], 'a refused first write is reported');
+    assert.equal(localStorage.getItem(key), null);
+    localStorage.failWrites = false;
+
+    Storage.preserveFolderGraphEvidence(e1.folders, e1.packs);
+    const keptRaw = localStorage.getItem(key);
+    localStorage.failWrites = true;
+    const refused = Storage.preserveFolderGraphEvidence(e2.folders, e2.packs);
+    assert.deepEqual([refused.ok, refused.reason], [false, 'storage'], 'a refused later write is reported');
+    assert.equal(localStorage.getItem(key), keptRaw, 'the stored evidence is exactly what it was');
+    assert.equal(localStorage.getItem(workspaceKey), workspaceBefore, 'the damaged workspace data is untouched');
+    assert.equal(JSON.stringify([e2.folders, e2.packs]), graphBefore, 'the graph that was passed in is not changed');
+
+    // The Repair action stops on any refusal, before FolderLibrary.repairFolderGraph() can run, and says so.
+    const packsSrc = await fs.readFile(packsScreenPath, 'utf8');
+    const flow = packsSrc.slice(packsSrc.indexOf('async function repairFolderDataWithConfirm'), packsSrc.indexOf('function movePackToFolder('));
+    assert.match(flow, /preserveFolderEvidence\(guard\.scope\)/, 'the copy is bound to the dialog\'s user and workspace');
+    const refusal = flow.indexOf('kept.ok !== true');
+    assert.ok(refusal > 0 && refusal < flow.indexOf('FolderLibrary.repairFolderGraph()'), 'the copy is checked before the repair runs');
+    assert.match(flow.slice(refusal, flow.indexOf('FolderLibrary.repairFolderGraph()')), /showToast\([\s\S]*'error'[\s\S]*return;/,
+      'a refusal shows an error and returns without repairing');
+  });
+});
+
+test('Stage 1 evidence: the record and size limits refuse safely and never overwrite or drop a copy', async () => {
+  await withEvidenceStorage('ev4', async ({ Storage, localStorage, evidenceKey }) => {
+    const key = evidenceKey('org-a');
+    const episodes = ['a', 'b', 'c', 'd', 'e', 'f'].map(evidenceEpisode);
+    episodes.slice(0, Storage.MAX_FOLDER_EVIDENCE_RECORDS).forEach(e => {
+      assert.equal(Storage.preserveFolderGraphEvidence(e.folders, e.packs).ok, true);
+    });
+    const full = localStorage.getItem(key);
+    assert.equal(JSON.parse(full).laterRecords.length, Storage.MAX_FOLDER_EVIDENCE_RECORDS - 1, 'the limit is reached');
+
+    const over = episodes[5];
+    const refused = Storage.preserveFolderGraphEvidence(over.folders, over.packs);
+    assert.deepEqual([refused.ok, refused.reason], [false, 'limit']);
+    assert.match(refused.message, /already keeps 5 recovery copies/);
+    assert.equal(localStorage.getItem(key), full, 'nothing is overwritten or dropped at the limit');
+    assert.equal(Storage.preserveFolderGraphEvidence(episodes[2].folders, episodes[2].packs).existing, true,
+      'a copy that is already kept is still recognised at the limit');
+  });
+  await withEvidenceStorage('ev4b', async ({ Storage, localStorage, evidenceKey }) => {
+    const key = evidenceKey('org-a');
+    const small = evidenceEpisode('a');
+    const huge = evidenceEpisode('h');
+    huge.folders[0].name = 'x'.repeat(Storage.MAX_FOLDER_EVIDENCE_CHARS + 1);
+
+    const nothingYet = Storage.preserveFolderGraphEvidence(huge.folders, huge.packs);
+    assert.deepEqual([nothingYet.ok, nothingYet.reason], [false, 'size'], 'a first copy over the size limit is refused');
+    assert.equal(localStorage.getItem(key), null);
+
+    Storage.preserveFolderGraphEvidence(small.folders, small.packs);
+    const kept = localStorage.getItem(key);
+    const tooBig = Storage.preserveFolderGraphEvidence(huge.folders, huge.packs);
+    assert.deepEqual([tooBig.ok, tooBig.reason], [false, 'size'], 'a later copy that would pass the size limit is refused');
+    assert.equal(localStorage.getItem(key), kept, 'the kept copies are untouched');
+
+    // Evidence that cannot be read is never replaced.
+    localStorage.setItem(key, '{not json');
+    const unreadable = Storage.preserveFolderGraphEvidence(small.folders, small.packs);
+    assert.deepEqual([unreadable.ok, unreadable.reason], [false, 'unreadable']);
+    assert.equal(localStorage.getItem(key), '{not json');
+  });
+});
+
+test('Stage 1 evidence: a copy is written only to the workspace it was made in', async () => {
+  await withEvidenceStorage('ev5', async ({ Storage, localStorage, evidenceKey }) => {
+    const [e1, e2] = ['a', 'b'].map(evidenceEpisode);
+    const inA = Storage.captureScopeContext();
+
+    Storage.setWorkspaceScope('org-b');
+    const stale = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs, inA);
+    assert.deepEqual([stale.ok, stale.reason], [false, 'scope-changed'], 'a copy made in workspace A is refused in workspace B');
+    assert.equal(localStorage.getItem(evidenceKey('org-a')), null);
+    assert.equal(localStorage.getItem(evidenceKey('org-b')), null, 'nothing is written into workspace B either');
+
+    assert.equal(Storage.preserveFolderGraphEvidence(e2.folders, e2.packs, Storage.captureScopeContext()).ok, true);
+    assert.equal(localStorage.getItem(evidenceKey('org-a')), null, 'workspace B evidence never lands in workspace A');
+    assert.deepEqual(JSON.parse(localStorage.getItem(evidenceKey('org-b'))).folderLibrary, e2.folders);
+
+    // A to B to A is a different identity from the first A, although the key is the same string.
+    Storage.setWorkspaceScope('org-a');
+    const stillStale = Storage.preserveFolderGraphEvidence(e1.folders, e1.packs, inA);
+    assert.deepEqual([stillStale.ok, stillStale.reason], [false, 'scope-changed']);
+    assert.equal(localStorage.getItem(evidenceKey('org-a')), null);
+    assert.equal(Storage.preserveFolderGraphEvidence(e1.folders, e1.packs, Storage.captureScopeContext()).ok, true);
+    assert.deepEqual(JSON.parse(localStorage.getItem(evidenceKey('org-a'))).folderLibrary, e1.folders);
+    assert.deepEqual(JSON.parse(localStorage.getItem(evidenceKey('org-b'))).folderLibrary, e2.folders, 'B keeps only its own copy');
+  });
+});
+
+test('Stage 1 F-03 F-05 strict Workspace Backup parsing is unchanged: a real Folder id looks fine, a damaged graph is refused', async () => {
+  const originalWindow = globalThis.window;
+  globalThis.window = { crypto: globalThis.crypto };
+  try {
+    const ImportExport = await import(`${importExportPath.href}?f03=${Date.now()}-${Math.random()}`);
+    const folder = (id) => ({ id, name: `F ${id}`, scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1 });
+    const pack = (id, folderId) => ({ id, title: id, folderId, cases: [], truck: { length: 100, width: 80, height: 80, shapeMode: 'rect' }, createdAt: 1, lastEdited: 1 });
+    const make = (folders, packs) => JSON.stringify({ exportType: 'workspace', data: { caseLibrary: [], packLibrary: packs, folderLibrary: folders } });
+
+    const parsed = ImportExport.parseWorkspaceImportJSON(make([folder('__unfiled__')], [pack('p1', '__unfiled__')]));
+    assert.deepEqual(parsed.folderLibrary.map(f => f.id), ['__unfiled__'], 'a Folder id that looks like the Unfiled token imports as a real Folder');
+    assert.deepEqual(parsed.packLibrary.map(p => p.folderId), ['__unfiled__'], 'its assignment survives');
+    assert.throws(() => ImportExport.parseWorkspaceImportJSON(make([folder('a'), folder('a')], [pack('p1', 'a')])),
+      /duplicate id/, 'a repeated Folder id is still refused on import');
+    assert.throws(() => ImportExport.parseWorkspaceImportJSON(make([folder('a')], [pack('p1', 'gone')])),
+      /referenced folder does not exist/, 'a dangling folderId is still refused on import');
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+async function freshFolderService(state) {
+  const StateStore = await import(stateStorePath.href);
+  const FolderLibrary = await import(`${folderLibraryPath.href}?c=${Date.now()}-${Math.random()}`);
+  StateStore.init({ caseLibrary: [], packLibrary: [], folderLibrary: [], preferences: {}, ...state });
+  return { StateStore, FolderLibrary };
+}
+
+const folderRecord = (id, name, extra = {}) => ({
+  id, name, scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1, ...extra,
+});
+
+test('Stage 1 name policy: one rule set for creation and rename, enforced by the service', async () => {
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: [folderRecord('f1', 'Client A'), folderRecord('f2', 'Café')],
+  });
+  const refused = (name, reason, excludeFolderId) => {
+    const result = FolderLibrary.validateFolderName(name, { excludeFolderId });
+    assert.equal(result.ok, false, `${JSON.stringify(name)} is refused`);
+    assert.equal(result.reason, reason);
+    assert.ok(result.message.length > 0, 'a refusal always carries a message');
+  };
+
+  assert.equal(FolderLibrary.validateFolderName('  Client B  ').name, 'Client B', 'names are trimmed');
+  refused('', 'empty');
+  refused('   \t ', 'empty');
+  refused(null, 'empty');
+  assert.equal(FolderLibrary.validateFolderName('\u{1F600}'.repeat(100)).ok, true, '100 code points is allowed');
+  refused('\u{1F600}'.repeat(101), 'too-long');
+  refused('x'.repeat(101), 'too-long');
+  refused('client a', 'duplicate');
+  refused('  CLIENT A ', 'duplicate');
+  refused('Café', 'duplicate'); // precomposed and decomposed spellings are the same name
+  assert.equal(FolderLibrary.validateFolderName('client a', { excludeFolderId: 'f1' }).ok, true,
+    'a Folder may change only the case of its own name');
+  ['<img src=x onerror=alert(1)>', 'Q4 / "East" & West', '客户 — Ångström', '#1: 50% off!'].forEach(name => {
+    assert.equal(FolderLibrary.validateFolderName(name).name, name, `${name} is allowed and stored as typed`);
+  });
+
+  const before = JSON.stringify(StateStore.get('folderLibrary'));
+  const depth = StateStore.undoDepth();
+  assert.equal(FolderLibrary.createFolder('client a'), null, 'creation applies the same rules');
+  assert.equal(FolderLibrary.renameFolderResult('f2', 'Client A').ok, false, 'rename applies the same rules');
+  assert.equal(JSON.stringify(StateStore.get('folderLibrary')), before, 'a refused name changes nothing');
+  assert.equal(StateStore.undoDepth(), depth, 'and writes no history');
+  const html = FolderLibrary.createFolder('<b>x</b>');
+  assert.equal(html.name, '<b>x</b>', 'markup-looking text is data, kept exactly');
+});
+
+test('Stage 1 name policy: historical records that break the policy are never rewritten', async () => {
+  const longName = 'L'.repeat(150);
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: [folderRecord('f-long', longName), folderRecord('f-a', 'Same'), folderRecord('f-b', 'same')],
+  });
+  const depth = StateStore.undoDepth();
+  const unchanged = FolderLibrary.renameFolderResult('f-long', longName);
+  assert.deepEqual([unchanged.ok, unchanged.changed], [true, false], 'saving a historical name as it is is not an error and not a change');
+  assert.equal(FolderLibrary.renameFolderResult('f-a', 'Same').changed, false);
+  assert.equal(StateStore.undoDepth(), depth);
+  assert.deepEqual(StateStore.get('folderLibrary').map(f => f.name), [longName, 'Same', 'same'],
+    'long and case-duplicate historical names are kept exactly');
+  assert.equal(FolderLibrary.renameFolderResult('f-long', 'x'.repeat(101)).reason, 'too-long',
+    'a new name for a historical record must follow the policy');
+});
+
+test('Stage 1 F-06 a rename or move that changes nothing writes nothing', async () => {
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: [folderRecord('f1', 'Client A', { updatedAt: 111 }), folderRecord('f2', 'Other')],
+    packLibrary: [
+      { id: 'p-in', title: 'In', folderId: 'f1', lastEdited: 500, thumbnail: 'data:keep', cases: [{ id: 'i1' }] },
+      { id: 'p-free', title: 'Free', folderId: null, lastEdited: 600 },
+      { id: 'p-none', title: 'None', lastEdited: 650 },
+      { id: 'p-stale', title: 'Stale', folderId: 'f-gone', lastEdited: 700 },
+    ],
+  });
+  const snapshot = () => JSON.stringify([StateStore.get('folderLibrary'), StateStore.get('packLibrary')]);
+  const before = snapshot();
+  const depth = StateStore.undoDepth();
+
+  const sameRename = FolderLibrary.renameFolderResult('f1', '  Client A ');
+  assert.deepEqual([sameRename.ok, sameRename.changed], [true, false], 'the same name after trimming is not a change');
+  assert.equal(sameRename.folder.updatedAt, 111, 'updatedAt is untouched');
+  const sameMove = FolderLibrary.movePackToFolderResult('p-in', 'f1');
+  assert.deepEqual([sameMove.ok, sameMove.changed], [true, false], 'moving to the current Folder is not a change');
+  assert.equal(FolderLibrary.movePackToFolderResult('p-free', null).changed, false, 'null to null is not a change');
+  assert.equal(FolderLibrary.movePackToFolderResult('p-none', '').changed, false, 'a missing folderId is already Unfiled');
+  assert.equal(snapshot(), before, 'nothing was written: no lastEdited, no preview field, no cargo change');
+  assert.equal(StateStore.undoDepth(), depth, 'no history step, so Redo is not invalidated');
+  StateStore.undo();
+  StateStore.redo(); // would be impossible if a no-op had pushed a step over the redo tail
+
+  const caseOnly = FolderLibrary.renameFolderResult('f1', 'client a');
+  assert.deepEqual([caseOnly.ok, caseOnly.changed], [true, true], 'a case-only rename is a real change');
+  assert.equal(StateStore.undoDepth() - depth, 1);
+
+  const realMove = FolderLibrary.movePackToFolderResult('p-in', 'f2');
+  assert.equal(realMove.changed, true);
+  assert.ok(realMove.pack.lastEdited > 500, 'a real move keeps the existing lastEdited behaviour');
+  assert.equal(realMove.pack.thumbnail, 'data:keep', 'a move does not touch the preview');
+  assert.deepEqual(realMove.pack.cases, [{ id: 'i1' }], 'a move does not touch cargo');
+  const staleToUnfiled = FolderLibrary.movePackToFolderResult('p-stale', null);
+  assert.equal(staleToUnfiled.changed, true, 'a stale reference is not "already Unfiled": moving it is a real repair');
+});
+
+test('Stage 1 review: a legacy padded Folder name saved unchanged is a no-op, and a genuine rename still follows the policy', async () => {
+  const padded = '  Legacy Docks  ';
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: [folderRecord('f-pad', padded, { updatedAt: 111 }), folderRecord('f-b', 'Other', { updatedAt: 222 })],
+  });
+  // A real change followed by Undo leaves a Redo step waiting; saving the same name must not invalidate it.
+  assert.equal(FolderLibrary.renameFolderResult('f-b', 'Other 2').changed, true);
+  assert.equal(StateStore.undo(), true);
+  const before = JSON.stringify(StateStore.get('folderLibrary'));
+  const depth = StateStore.undoDepth();
+
+  ['Legacy Docks', '  Legacy Docks  ', 'Legacy Docks ', '\tLegacy Docks'].forEach(input => {
+    const result = FolderLibrary.renameFolderResult('f-pad', input);
+    assert.deepEqual([result.ok, result.changed], [true, false], `${JSON.stringify(input)} is the same name as the padded one`);
+  });
+  assert.equal(JSON.stringify(StateStore.get('folderLibrary')), before, 'nothing was written, and no record was normalized as a side effect');
+  assert.equal(StateStore.get('folderLibrary')[0].name, padded, 'the padded historical name is kept exactly as stored');
+  assert.equal(StateStore.get('folderLibrary')[0].updatedAt, 111, 'updatedAt is untouched');
+  assert.equal(StateStore.undoDepth(), depth, 'no history step');
+  assert.equal(StateStore.redo(), true, 'the waiting Redo step survived the unchanged saves');
+  assert.equal(StateStore.get('folderLibrary')[1].name, 'Other 2');
+
+  const redone = StateStore.undoDepth();
+  assert.equal(FolderLibrary.renameFolderResult('f-pad', '   ').reason, 'empty', 'a blank name is still refused');
+  const duplicate = FolderLibrary.renameFolderResult('f-pad', ' other 2 ');
+  assert.deepEqual([duplicate.ok, duplicate.reason], [false, 'duplicate'], 'a genuine rename still follows the duplicate rule');
+  assert.equal(StateStore.undoDepth(), redone, 'refused names write nothing');
+  const real = FolderLibrary.renameFolderResult('f-pad', '  Legacy Yard ');
+  assert.deepEqual([real.ok, real.changed], [true, true], 'a genuinely different name is a real change');
+  assert.equal(real.folder.name, 'Legacy Yard', 'a new name is stored trimmed, by the approved policy');
+  assert.ok(real.folder.updatedAt > 111, 'a real rename updates updatedAt');
+  assert.equal(StateStore.undoDepth(), redone + 1, 'and adds exactly one history step');
+});
+
+test('Stage 1 Folder cap and ids: the 2,000 limit matches Workspace Backup and ids stay unique', async () => {
+  const { WORKSPACE_BACKUP_LIMITS } = await import(`${importExportPath.href}?cap=${Date.now()}`);
+  const { StateStore, FolderLibrary } = await freshFolderService({
+    folderLibrary: Array.from({ length: 1999 }, (_, i) => folderRecord(`f-${i}`, `Folder ${i}`)),
+  });
+  assert.equal(FolderLibrary.MAX_FOLDERS, WORKSPACE_BACKUP_LIMITS.maxFolders, 'one limit, so a backup of a full workspace still works');
+  const last = FolderLibrary.createFolderResult('Folder 1999');
+  assert.equal(last.ok, true, 'the 2,000th Folder is allowed');
+  const over = FolderLibrary.createFolderResult('One too many');
+  assert.deepEqual([over.ok, over.reason], [false, 'limit']);
+  assert.match(over.message, /2,000 Folders/);
+  assert.equal(StateStore.get('folderLibrary').length, 2000, 'the refused Folder was not added');
+
+  const fresh = await freshFolderService({ folderLibrary: [folderRecord('__unfiled__', 'Looks like a token'), folderRecord(' x', 'Damaged id')] });
+  const ids = Array.from({ length: 40 }, (_, i) => fresh.FolderLibrary.createFolder(`New ${i}`).id);
+  assert.equal(new Set(ids).size, 40, 'minted ids are unique');
+  assert.ok(ids.every(id => id === id.trim() && id.length > 0 && id !== '__unfiled__'), 'and valid');
+  const src = await fs.readFile(folderLibraryPath, 'utf8');
+  assert.match(src, /function mintFolderId\(folders\)[\s\S]*?!taken\.has\(id\)[\s\S]*?return null;/,
+    'minting retries against every stored id and fails closed instead of reusing one');
+});
+
+test('Stage 1 F-08 Editor Undo and Redo are unchanged; Load Plans reaches only the Packs screen Folder steps', async () => {
+  const keyboardSrc = await fs.readFile(new URL('../../src/ui/keyboard-manager.js', import.meta.url), 'utf8');
+  const appSrc = await readAppSource();
+  const packsSrc = await fs.readFile(packsScreenPath, 'utf8');
+  const undoFn = functionBlock(keyboardSrc, 'function undo()', '\n    function redo()');
+  const redoFn = functionBlock(keyboardSrc, 'function redo()', '\n    // Escape clears');
+
+  assert.match(undoFn, /if \(!inEditor\(\)\) return Boolean\(folderHistory && folderHistory\.undo\(\)\);\s*if \(mutationBlockedWhileBusy\(\)\) return true;\s*const ok = StateStore\.undo\(\);/,
+    'in the Editor Undo is exactly what it was; elsewhere only the Folder provider may act');
+  assert.match(redoFn, /if \(!inEditor\(\)\) return Boolean\(folderHistory && folderHistory\.redo\(\)\);\s*if \(mutationBlockedWhileBusy\(\)\) return true;\s*const ok = StateStore\.redo\(\);/,
+    'the same holds for Redo');
+  assert.match(keyboardSrc, /if \(event\.defaultPrevented \|\| UIComponents\.modalOwnership\?\.blocksKeyboardEvent\(event\)\) return;\s*if \(isTypingContext\(event\)\) return;/,
+    'dialogs and text fields still own the key before any shortcut runs');
+  assert.match(appSrc, /folderHistory: \{\s*undo: \(\) => Boolean\(PacksUI && PacksUI\.undoFolderStep\(\)\),\s*redo: \(\) => Boolean\(PacksUI && PacksUI\.redoFolderStep\(\)\),/,
+    'app.js hands the keyboard manager the Packs screen provider and nothing else');
+  const step = functionBlock(packsSrc, 'function stepFolderHistory(direction)', '\n    // The stored Folder graph');
+  assert.match(step, /isScopeContextCurrent\(run\.scope\)/, 'the run is bound to the user and workspace it was made in');
+  assert.match(step, /StateStore\.get\('currentScreen'\) !== 'packs'\) return false/, 'only on the Load Plans screen');
+  assert.match(step, /StateStore\.undo\(\)[\s\S]*StateStore\.redo\(\)/, 'it uses the shared history, not a second stack');
+  assert.doesNotMatch(packsSrc, /const folderHistory(Stack|Entries)|undoStack|redoStack/, 'no second history stack exists');
 });

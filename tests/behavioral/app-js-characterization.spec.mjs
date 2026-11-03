@@ -1969,3 +1969,714 @@ test('C4 saved invalid pose survives open, read-only Check and referenced Case e
   assert.deepEqual(scenario.diagnostics.pageErrors, []);
   await page.screenshot({ path: '/tmp/c4-editor-preserved-pose.png' });
 });
+
+// ── Folder Foundation Stage 1: Folder dialogs in the real app ───────────────────────────────
+// Real clicks and typing drive the dialogs. The one stale-handler probe below calls a held button's
+// click() directly and says so: it proves the write-time re-validation, not user behaviour.
+const HOSTILE_FOLDER_NAME = '<img src=x onerror="window.__tp3dFolderXss=1"><b>bold</b> &amp; <script>window.__tp3dFolderXss=2</script>';
+const folderWorkspaceKey = orgId => `truckPacker3d:v1:user-a:workspace:${orgId}`;
+
+function folderWorkspacePayload({ folders = [], packs = [] }) {
+  return {
+    version: 'folder-stage1',
+    savedAt: 1,
+    caseLibrary: [],
+    packLibrary: packs.map(pack => ({
+      truck: { length: 100, width: 80, height: 80, shapeMode: 'rect' },
+      cases: [], groups: [], createdAt: 1, lastEdited: 2, folderId: null, ...pack,
+    })),
+    folderLibrary: folders.map(folder => ({
+      scope: 'pack', parentFolderId: null, sortOrder: 0, createdAt: 1, updatedAt: 1, ...folder,
+    })),
+    currentPackId: null,
+  };
+}
+
+async function seedFolderWorkspaces(scenario, entries) {
+  // The same npm Three.js import map the C3 fixture uses, then first-write-only localStorage seeds.
+  await scenario.context.route('**/index.html', async route => {
+    const response = await route.fetch();
+    const imports = { three: '/node_modules/three/build/three.module.js',
+      'three/addons/': '/node_modules/three/examples/jsm/' };
+    const body = (await response.text()).replace('<head>',
+      `<head><script type="importmap">${JSON.stringify({ imports })}</script>`);
+    await route.fulfill({ response, body });
+  });
+  await scenario.context.addInitScript(values => {
+    for (const [key, data] of values) {
+      if (localStorage.getItem(key) === null) localStorage.setItem(key, JSON.stringify(data));
+    }
+  }, entries);
+}
+
+async function openFolderLibrary(scenario, page) {
+  await scenario.waitForAppReady(page);
+  await waitForSignedInOwner(page, 'user-a', ORG_A);
+  await page.locator('.tp3d-packs-folder-btn').waitFor({ state: 'visible' });
+}
+
+async function openFoldersMenu(page) {
+  await page.locator('.tp3d-packs-folder-btn').click();
+  const menu = page.locator('[data-dropdown="1"][data-role="packs-folders"]');
+  await menu.waitFor({ state: 'visible' });
+  return menu;
+}
+
+async function chooseFolderFilter(page, label) {
+  const menu = await openFoldersMenu(page);
+  await menu.getByRole('menuitem').filter({ hasText: label }).first().click();
+}
+
+async function chooseFolderAction(page, action) {
+  const menu = await openFoldersMenu(page);
+  await menu.getByRole('menuitem', { name: action }).click();
+}
+
+async function folderSnapshot(page) {
+  return page.evaluate(async () => {
+    const StateStore = await import('/src/core/state-store.js');
+    return JSON.stringify({
+      folders: (StateStore.get('folderLibrary') || []).map(f => [f.id, f.name, f.updatedAt]),
+      packs: (StateStore.get('packLibrary') || []).map(p => [p.id, p.folderId, p.lastEdited]),
+      undoDepth: StateStore.undoDepth(),
+    });
+  });
+}
+
+test('Folder Stage 1 F-01: a hostile Folder name is literal text in every Folder menu and dialog', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), folderWorkspacePayload({
+    folders: [{ id: 'f-hostile', name: HOSTILE_FOLDER_NAME }],
+    packs: [{ id: 'p1', title: 'Plan One', loadPlanNumber: 'LP-00000001', folderId: 'f-hostile' }],
+  })]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+
+  // Stored data: the Folders menu row and the button label, then the Delete confirmation.
+  await chooseFolderFilter(page, 'tp3dFolderXss');
+  assert.equal(await page.locator('.tp3d-packs-folder-btn__label').textContent(), HOSTILE_FOLDER_NAME);
+  await chooseFolderAction(page, 'Delete Folder');
+  const confirmBody = page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) .modal-body');
+  await confirmBody.waitFor({ state: 'visible' });
+  assert.ok((await confirmBody.textContent()).includes(`Delete "${HOSTILE_FOLDER_NAME}"?`),
+    'the confirmation shows the name literally');
+  assert.equal(await page.locator('#modal-root img, #modal-root b, #modal-root script').count(), 0,
+    'no element was created from the name');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay])').waitFor({ state: 'detached' });
+
+  // Rename dialog and Move dialog.
+  await chooseFolderAction(page, 'Rename Folder');
+  assert.equal(await page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').inputValue(), HOSTILE_FOLDER_NAME);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay])').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'More actions for Plan One', exact: true }).click();
+  await page.locator('.dropdown-item', { hasText: 'Move to Folder' }).click();
+  await page.locator('#modal-root .tp3d-packs-folder-option-btn').first().waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#modal-root img, #modal-root b, #modal-root script').count(), 0);
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay])').waitFor({ state: 'detached' });
+
+  // Created through the UI with real typing: same literal rendering, then delete it.
+  await chooseFolderAction(page, 'New Folder');
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').fill(HOSTILE_FOLDER_NAME.replace('tp3dFolderXss=1', 'tp3dFolderXss=3').slice(0, 90));
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await chooseFolderAction(page, 'Delete Folder');
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) .modal-body').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#modal-root img, #modal-root b, #modal-root script').count(), 0);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+  assert.equal(await page.evaluate(() => window.__tp3dFolderXss), undefined, 'no handler or script ran');
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+test('Folder Stage 1 F-02: open Folder dialogs cannot act after A to B and A to B to A with overlapping ids', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  const workspace = name => folderWorkspacePayload({
+    folders: [{ id: 'f1', name: `${name} One`, sortOrder: 0 }, { id: 'f2', name: `${name} Two`, sortOrder: 100 }],
+    packs: [
+      { id: 'p1', title: `${name} Plan 1`, loadPlanNumber: 'LP-00000001', folderId: 'f1' },
+      { id: 'p2', title: `${name} Plan 2`, loadPlanNumber: 'LP-00000002', folderId: null },
+    ],
+  });
+  await seedFolderWorkspaces(scenario, [
+    [folderWorkspaceKey(ORG_A), workspace('Alpha')],
+    [folderWorkspaceKey(ORG_B), workspace('Beta')],
+  ]);
+  const receiver = await scenario.openPage();
+  const sender = await scenario.openPage();
+  await Promise.all([openFolderLibrary(scenario, receiver), openFolderLibrary(scenario, sender)]);
+
+  const holdPrimaryAction = (page, selector) => page.evaluate(sel => {
+    window.__tp3dHeldFolderAction = document.querySelector(sel);
+    return Boolean(window.__tp3dHeldFolderAction);
+  }, selector);
+  const dialogs = {
+    async create() {
+      await chooseFolderAction(receiver, 'New Folder');
+      await receiver.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').fill('Injected By Stale Dialog');
+      return holdPrimaryAction(receiver, '#modal-root .modal-overlay:not([data-auth-overlay]) .modal-footer button.btn-primary');
+    },
+    async rename() {
+      await chooseFolderFilter(receiver, 'Alpha One');
+      await chooseFolderAction(receiver, 'Rename Folder');
+      await receiver.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').fill('Renamed By Stale Dialog');
+      return holdPrimaryAction(receiver, '#modal-root .modal-overlay:not([data-auth-overlay]) .modal-footer button.btn-primary');
+    },
+    async delete() {
+      await chooseFolderFilter(receiver, 'Alpha One');
+      await chooseFolderAction(receiver, 'Delete Folder');
+      await receiver.locator('#modal-root .modal-overlay:not([data-auth-overlay]) .modal-footer button.btn-danger').waitFor({ state: 'visible' });
+      return holdPrimaryAction(receiver, '#modal-root .modal-overlay:not([data-auth-overlay]) .modal-footer button.btn-danger');
+    },
+    async move() {
+      await receiver.getByRole('button', { name: 'More actions for Alpha Plan 2', exact: true }).click();
+      await receiver.locator('.dropdown-item', { hasText: 'Move to Folder' }).click();
+      await receiver.locator('#modal-root .tp3d-packs-folder-option-btn').first().waitFor({ state: 'visible' });
+      return holdPrimaryAction(receiver,
+        '#modal-root .tp3d-packs-folder-option-btn:has(.tp3d-packs-folder-option-btn__label)'
+        + ':nth-of-type(3)');
+    },
+  };
+  const switchBoth = async (orgId, name) => {
+    await armWorkspaceReady(receiver, orgId);
+    await switchWorkspaceAndWait(sender, orgId, name);
+    await readArmedWorkspaceReady(receiver);
+    await receiver.locator('.tp3d-packs-folder-btn').waitFor({ state: 'visible' });
+  };
+
+  for (const kind of ['create', 'rename', 'delete', 'move']) {
+    assert.equal(await dialogs[kind](), true, `${kind}: the dialog's action button was held`);
+
+    await switchBoth(ORG_B, 'Workspace B');
+    assert.equal(await receiver.locator('#modal-root .modal-overlay:not([data-auth-overlay])').count(), 0,
+      `${kind}: the dialog is dismissed when the workspace changes`);
+    const inB = await folderSnapshot(receiver);
+    // Stale-handler probe (direct click): the dialog is gone, but its handler must still refuse to write.
+    await receiver.evaluate(() => window.__tp3dHeldFolderAction.click());
+    await receiver.locator('.toast', { hasText: 'workspace changed' }).first().waitFor({ state: 'visible' });
+    assert.equal(await folderSnapshot(receiver), inB, `${kind}: A to B leaves workspace B untouched`);
+
+    await switchBoth(ORG_A, 'Workspace A');
+    const inA = await folderSnapshot(receiver);
+    await receiver.evaluate(() => window.__tp3dHeldFolderAction.click());
+    assert.equal(await folderSnapshot(receiver), inA,
+      `${kind}: A to B to A does not make the old dialog valid again`);
+    assert.match(inA, /Alpha One/);
+  }
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+// Titles (from `titles`) of the Load Plan cards currently shown in the grid.
+async function shownPlans(page, titles) {
+  const texts = await page.locator('#packs-grid .card').allTextContents();
+  return titles.filter(title => texts.some(text => text.includes(title)));
+}
+
+async function moveShownPlan(page, planTitle, destinationLabel) {
+  await page.getByRole('button', { name: `More actions for ${planTitle}`, exact: true }).click();
+  await page.locator('.dropdown-item', { hasText: 'Move to Folder' }).click();
+  await page.locator('#modal-root .tp3d-packs-folder-option-btn').first().waitFor({ state: 'visible' });
+  await page.locator('#modal-root .tp3d-packs-folder-option-btn', { hasText: destinationLabel }).first().click();
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay])').waitFor({ state: 'detached' });
+}
+
+test('Folder Stage 1 F-05: a real Folder whose id looks like the Unfiled token filters separately from Unfiled', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), folderWorkspacePayload({
+    folders: [{ id: '__unfiled__', name: 'Odd Id Folder' }],
+    packs: [
+      { id: 'p1', title: 'Plan One', loadPlanNumber: 'LP-00000001' },
+      { id: 'p2', title: 'Plan Two', loadPlanNumber: 'LP-00000002' },
+    ],
+  })]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+  const titles = ['Plan One', 'Plan Two'];
+
+  await moveShownPlan(page, 'Plan One', 'Odd Id Folder');
+  const stored = JSON.parse(await folderSnapshot(page));
+  assert.deepEqual(stored.folders.map(f => [f[0], f[1]]), [['__unfiled__', 'Odd Id Folder']],
+    'the real Folder keeps its id and its name');
+  assert.deepEqual(stored.packs.map(p => [p[0], p[1]]), [['p1', '__unfiled__'], ['p2', null]]);
+
+  await chooseFolderFilter(page, 'Odd Id Folder (1)');
+  assert.deepEqual(await shownPlans(page, titles), ['Plan One'], 'the Folder filter shows only its own plan');
+  assert.equal(await page.locator('.tp3d-packs-folder-btn__label').textContent(), 'Odd Id Folder');
+
+  await chooseFolderFilter(page, 'Unfiled (1)');
+  assert.deepEqual(await shownPlans(page, titles), ['Plan Two'], 'the Unfiled filter shows only the plan with no Folder');
+  assert.equal(await page.locator('.tp3d-packs-folder-btn__label').textContent(), 'Unfiled');
+
+  await chooseFolderFilter(page, 'All Load Plans (2)');
+  assert.deepEqual(await shownPlans(page, titles), titles);
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+test('Folder Stage 1 F-03: damaged Folder data stays as stored, no plan is invisible, and repair is explicit', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  const seeded = folderWorkspacePayload({
+    folders: [
+      { id: 'f-good', name: 'Good Folder' },
+      { id: 'f-dup', name: 'Dup First' },
+      { id: 'f-dup', name: 'Dup Second' },
+    ],
+    packs: [
+      { id: 'p-ok', title: 'Plan Ok', loadPlanNumber: 'LP-00000001', folderId: 'f-good' },
+      { id: 'p-ghost', title: 'Plan Ghost', loadPlanNumber: 'LP-00000002', folderId: 'f-gone' },
+      { id: 'p-dup', title: 'Plan Dup', loadPlanNumber: 'LP-00000003', folderId: 'f-dup' },
+      { id: 'p-free', title: 'Plan Free', loadPlanNumber: 'LP-00000004' },
+    ],
+  });
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), seeded]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+  const titles = ['Plan Ok', 'Plan Ghost', 'Plan Dup', 'Plan Free'];
+
+  // Startup changed nothing: the stored Folder records are exactly the seeded ones, and the original is kept.
+  const afterLoad = await page.evaluate(({ key, evidence }) => ({
+    folders: JSON.parse(localStorage.getItem(key)).folderLibrary.map(f => [f.id, f.name]),
+    evidence: JSON.parse(localStorage.getItem(evidence) || 'null'),
+  }), { key: folderWorkspaceKey(ORG_A), evidence: `${folderWorkspaceKey(ORG_A)}:folder-graph-evidence` });
+  assert.deepEqual(afterLoad.folders, [['f-good', 'Good Folder'], ['f-dup', 'Dup First'], ['f-dup', 'Dup Second']]);
+  assert.deepEqual(afterLoad.evidence.folderLibrary.map(f => f.name), ['Good Folder', 'Dup First', 'Dup Second']);
+  assert.equal(afterLoad.evidence.packFolderRefs.find(r => r.id === 'p-ghost').folderId, 'f-gone');
+
+  // A visible, persistent warning; every plan is reachable; the counts add up.
+  const notice = page.locator('#packs-folder-notice');
+  await notice.waitFor({ state: 'visible' });
+  assert.match(await notice.textContent(), /2 load plans point to a Folder that cannot be found or used safely/);
+  assert.match(await notice.textContent(), /Nothing was changed or deleted/);
+  assert.deepEqual(await shownPlans(page, titles), titles, 'All shows every plan, including the unresolved ones');
+  const menu = await openFoldersMenu(page);
+  const rows = await menu.getByRole('menuitem').allTextContents();
+  assert.ok(rows.some(r => r.includes('All Load Plans (4)')));
+  assert.ok(rows.some(r => r.includes('Unfiled (1)')));
+  assert.ok(rows.some(r => r.includes('Needs attention (2)')));
+  assert.ok(rows.some(r => r.includes('Good Folder (1)')));
+  assert.ok(!rows.some(r => r.includes('Dup First') || r.includes('Dup Second')),
+    'a Folder whose id is shared is not offered as a target');
+  await page.keyboard.press('Escape');
+
+  await chooseFolderFilter(page, 'Needs attention (2)');
+  assert.deepEqual(await shownPlans(page, titles), ['Plan Ghost', 'Plan Dup']);
+  assert.equal(await page.locator('.tp3d-packs-folder-btn__label').textContent(), 'Needs attention');
+  await chooseFolderFilter(page, 'Unfiled (1)');
+  assert.deepEqual(await shownPlans(page, titles), ['Plan Free'], 'unresolved plans do not hide inside Unfiled');
+
+  // An explicit move resolves one plan; the damaged records are still stored untouched.
+  await chooseFolderFilter(page, 'Needs attention (2)');
+  await moveShownPlan(page, 'Plan Ghost', 'Unfiled');
+  assert.match(await notice.textContent(), /1 load plan points to a Folder/);
+  const mid = JSON.parse(await folderSnapshot(page));
+  assert.deepEqual(mid.folders.map(f => f[1]), ['Good Folder', 'Dup First', 'Dup Second']);
+  assert.equal(mid.packs.find(p => p[0] === 'p-dup')[1], 'f-dup', 'the other plan keeps its stored reference');
+
+  // A copy that the browser refuses to keep stops the repair: the damaged graph and the kept evidence stay as they are.
+  const evidenceKey = `${folderWorkspaceKey(ORG_A)}:folder-graph-evidence`;
+  const evidenceBefore = await page.evaluate(key => localStorage.getItem(key), evidenceKey);
+  const graphBefore = await folderSnapshot(page);
+  await page.evaluate(key => {
+    window.__tp3dRealSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (name, value) {
+      if (name === key) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      return window.__tp3dRealSetItem.call(this, name, value);
+    };
+  }, evidenceKey);
+  await page.locator('#packs-folder-notice-repair').click();
+  await page.getByRole('button', { name: 'Repair', exact: true }).click();
+  await page.locator('.toast', { hasText: 'nothing was repaired' }).first().waitFor({ state: 'visible' });
+  assert.equal(await folderSnapshot(page), graphBefore, 'a refused copy leaves the damaged graph exactly as it was');
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), evidenceKey), evidenceBefore, 'the kept evidence is unchanged');
+  await notice.waitFor({ state: 'visible' });
+  await page.evaluate(() => { Storage.prototype.setItem = window.__tp3dRealSetItem; });
+
+  // Explicit repair: confirmed, original kept, nothing lost.
+  await page.locator('#packs-folder-notice-repair').click();
+  const dialog = page.locator('#modal-root .modal-overlay:not([data-auth-overlay])');
+  await dialog.waitFor({ state: 'visible' });
+  assert.match(await dialog.textContent(), /A copy of the current Folder data is kept in this browser first/);
+  assert.match(await dialog.textContent(), /point to a shared ID, or to a Folder that cannot be found, move to Unfiled/);
+  await page.getByRole('button', { name: 'Repair', exact: true }).click();
+  await notice.waitFor({ state: 'hidden' });
+  const repaired = JSON.parse(await folderSnapshot(page));
+  assert.equal(repaired.packs.length, 4, 'no Load Plan is lost');
+  assert.deepEqual(repaired.folders.map(f => f[1]).sort(), ['Dup First', 'Dup Second', 'Good Folder']);
+  assert.equal(new Set(repaired.folders.map(f => f[0])).size, 3, 'every Folder id is unique again');
+  assert.equal(repaired.packs.find(p => p[0] === 'p-dup')[1], null, 'a plan on a shared id is Unfiled: the app does not guess its Folder');
+  assert.deepEqual(await shownPlans(page, titles), titles);
+  const evidenceStill = await page.evaluate(key => {
+    const kept = JSON.parse(localStorage.getItem(key));
+    return [kept.folderLibrary.length, kept.packFolderRefs.find(r => r.id === 'p-dup').folderId, (kept.laterRecords || []).length];
+  }, evidenceKey);
+  assert.deepEqual(evidenceStill, [3, 'f-dup', 1],
+    'the original copy, including the shared-id reference, is still there, with the state just before the repair kept beside it');
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+test('Folder Stage 1 F-04: a refused save never shows success, shows one message, and a retry reports correctly', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), folderWorkspacePayload({
+    folders: [{ id: 'f1', name: 'Existing' }],
+    packs: [{ id: 'p1', title: 'Plan One', loadPlanNumber: 'LP-00000001' }],
+  })]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+  // Isolated test browser only: the workspace payload write is refused the way a full browser store refuses it.
+  await page.evaluate(() => {
+    window.__tp3dRefuseWrites = true;
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function setItem(key, value) {
+      if (window.__tp3dRefuseWrites && String(key).includes(':workspace:')) {
+        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      }
+      return original.call(this, key, value);
+    };
+  });
+  const toasts = page.locator('.toast');
+  // Only toasts about saving or Folders count; the app's own startup "Ready" toast is unrelated.
+  const toastTexts = async () => (await toasts.locator('.toast-message').allTextContents())
+    .filter(text => /save|Folder/i.test(text));
+
+  await chooseFolderAction(page, 'New Folder');
+  await page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]').fill('Retry Me');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await toasts.filter({ hasText: 'Not saved' }).first().waitFor({ state: 'visible' });
+  await page.waitForTimeout(700); // beyond the 250 ms autosave debounce: no second, generic failure may follow
+  const failed = await toastTexts();
+  assert.equal(failed.length, 1, `exactly one message, got: ${JSON.stringify(failed)}`);
+  assert.match(failed[0], /Not saved: the new Folder exists only on screen/);
+  assert.ok(!failed.some(text => /Folder created|Save failed/.test(text)), 'no success and no contradicting generic failure');
+  const unsaved = await page.evaluate(key => localStorage.getItem(key), folderWorkspaceKey(ORG_A));
+  assert.ok(!unsaved.includes('Retry Me'), 'the durable copy does not have the Folder');
+  assert.ok((await folderSnapshot(page)).includes('Retry Me'), 'the unsaved Folder stays on screen and in memory');
+
+  // Storage recovers; Retry saves the kept state and only now reports success.
+  await page.evaluate(() => { window.__tp3dRefuseWrites = false; });
+  await toasts.getByRole('button', { name: 'Retry', exact: true }).click();
+  await toasts.filter({ hasText: 'Folder created' }).first().waitFor({ state: 'visible' });
+  const saved = await page.evaluate(key => localStorage.getItem(key), folderWorkspaceKey(ORG_A));
+  assert.ok(saved.includes('Retry Me'), 'the retry reached localStorage');
+  await toasts.filter({ hasText: 'Not saved' }).first().waitFor({ state: 'detached' });
+  assert.ok(!(await toastTexts()).some(text => /Not saved|Save failed/.test(text)), 'the failure message is gone after the retry');
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+async function plainFolderState(page) {
+  const snapshot = JSON.parse(await folderSnapshot(page));
+  return JSON.stringify({ folders: snapshot.folders, packs: snapshot.packs });
+}
+
+async function modalOf(page) {
+  const modal = page.locator('#modal-root .modal-overlay:not([data-auth-overlay])');
+  await modal.waitFor({ state: 'visible' });
+  return modal;
+}
+
+test('Folder Stage 1 F-09 and name policy: accessible filter name, keyboard menu, inline validation, no-op rename', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), folderWorkspacePayload({
+    folders: [{ id: 'f1', name: 'Client A', sortOrder: 0 }, { id: 'f2', name: 'Other', sortOrder: 100 }],
+    packs: [
+      { id: 'p1', title: 'Plan One', loadPlanNumber: 'LP-00000001', folderId: 'f1' },
+      { id: 'p2', title: 'Plan Two', loadPlanNumber: 'LP-00000002' },
+    ],
+  })]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+  const button = page.locator('.tp3d-packs-folder-btn');
+
+  // F-09: the accessible name says which filter is on, and aria-expanded follows the menu.
+  assert.equal(await button.getAttribute('aria-label'), 'Folders filter. Current: All load plans');
+  await chooseFolderFilter(page, 'Client A (1)');
+  assert.equal(await button.getAttribute('aria-label'), 'Folders filter. Current: Client A');
+  await chooseFolderFilter(page, 'Unfiled (1)');
+  assert.equal(await button.getAttribute('aria-label'), 'Folders filter. Current: Unfiled');
+  assert.ok((await button.getAttribute('aria-label')).includes(await button.textContent()), 'the visible label is inside the accessible name');
+  assert.equal(await button.getAttribute('aria-expanded'), 'false');
+
+  // Keyboard: Enter opens, Escape closes and returns focus, an item chosen from the keyboard filters.
+  await button.focus();
+  await page.keyboard.press('Enter');
+  const menu = page.locator('[data-dropdown="1"][data-role="packs-folders"]');
+  await menu.waitFor({ state: 'visible' });
+  assert.equal(await button.getAttribute('aria-expanded'), 'true');
+  await page.keyboard.press('Escape');
+  await menu.waitFor({ state: 'detached' });
+  assert.equal(await button.getAttribute('aria-expanded'), 'false');
+  assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.className.includes('tp3d-packs-folder-btn')), true,
+    'focus returns to the Folders button');
+  await page.keyboard.press('Enter');
+  await menu.waitFor({ state: 'visible' });
+  await menu.getByRole('menuitem').filter({ hasText: 'All Load Plans' }).focus();
+  await page.keyboard.press('Enter');
+  await menu.waitFor({ state: 'detached' });
+  assert.equal(await button.getAttribute('aria-label'), 'Folders filter. Current: All load plans');
+  assert.equal(await button.getAttribute('aria-expanded'), 'false');
+
+  // Name policy in the real dialog: the message appears inline and the dialog stays open.
+  await chooseFolderAction(page, 'New Folder');
+  let dialog = await modalOf(page);
+  const input = dialog.locator('input[type="text"]');
+  const error = dialog.locator('.tp3d-field-error');
+  const before = await plainFolderState(page);
+  for (const [typed, expected] of [
+    ['', 'Enter a Folder name.'],
+    ['   ', 'Enter a Folder name.'],
+    ['client a', 'A Folder with this name already exists.'],
+    ['x'.repeat(101), 'Folder names can have up to 100 characters.'],
+  ]) {
+    await input.fill(typed);
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    await error.waitFor({ state: 'visible' });
+    assert.equal((await error.textContent()).trim(), expected);
+    assert.equal(await input.getAttribute('aria-invalid'), 'true');
+    assert.equal(await dialog.count(), 1, 'the dialog stays open');
+  }
+  assert.equal(await plainFolderState(page), before, 'a refused name writes nothing');
+  await input.fill('  Brand <New> Folder  ');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await dialog.waitFor({ state: 'detached' });
+  assert.equal(await page.locator('.tp3d-packs-folder-btn__label').textContent(), 'Brand <New> Folder', 'trimmed, stored as typed, shown as text');
+
+  // No-op rename: same name, no history step, no timestamp change, no success claim.
+  await chooseFolderAction(page, 'Rename Folder');
+  dialog = await modalOf(page);
+  const beforeNoop = await folderSnapshot(page);
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await dialog.waitFor({ state: 'detached' });
+  assert.equal(await folderSnapshot(page), beforeNoop, 'unchanged name: no write, no history, no updatedAt');
+  await page.locator('.toast', { hasText: 'Folder name unchanged' }).first().waitFor({ state: 'visible' });
+  assert.equal(await page.locator('.toast', { hasText: 'Folder renamed' }).count(), 0);
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+test('Folder Stage 1 Rename and Delete are reachable for every Folder from the Folders menu', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), folderWorkspacePayload({
+    folders: [{ id: 'f1', name: 'Client A', sortOrder: 0 }, { id: 'f2', name: 'Other', sortOrder: 100 }],
+    packs: [
+      { id: 'p1', title: 'Plan One', loadPlanNumber: 'LP-00000001', folderId: 'f2' },
+      { id: 'p2', title: 'Plan Two', loadPlanNumber: 'LP-00000002' },
+    ],
+  })]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+
+  // No Folder filter is on, yet each Folder can be managed; Unfiled is not listed.
+  await chooseFolderAction(page, /Manage Folders/);
+  let dialog = await modalOf(page);
+  assert.equal(await dialog.getByRole('button', { name: /^Rename Folder / }).count(), 2);
+  assert.equal(await dialog.getByRole('button', { name: /^Delete Folder / }).count(), 2);
+  assert.ok(!(await dialog.textContent()).includes('Unfiled'), 'Unfiled has no Rename or Delete');
+
+  // Keyboard: focus the Rename button of "Other" and press Enter. The dialog that opens is for that Folder.
+  const renameInput = page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]');
+  await dialog.getByRole('button', { name: 'Rename Folder Other', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await renameInput.waitFor({ state: 'visible' });
+  assert.equal(await renameInput.inputValue(), 'Other', 'the target is the Folder whose row was used');
+  await renameInput.fill('Other renamed');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await renameInput.waitFor({ state: 'detached' });
+  assert.deepEqual(JSON.parse(await folderSnapshot(page)).folders.map(f => f[1]), ['Client A', 'Other renamed']);
+
+  // Delete from the same place: the Load Plan in it moves to Unfiled and nothing else is lost.
+  await chooseFolderAction(page, /Manage Folders/);
+  dialog = await modalOf(page);
+  await dialog.getByRole('button', { name: 'Delete Folder Other renamed', exact: true }).click();
+  const confirm = page.locator('#modal-root .modal-body', { hasText: 'Delete "Other renamed"?' });
+  await confirm.waitFor({ state: 'visible' });
+  assert.match(await confirm.textContent(), /Delete "Other renamed"\? 1 load plan\(s\)/);
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.locator('.toast', { hasText: 'Folder deleted' }).first().waitFor({ state: 'visible' });
+  const after = JSON.parse(await folderSnapshot(page));
+  assert.deepEqual(after.folders.map(f => f[1]), ['Client A']);
+  assert.deepEqual(after.packs.map(p => [p[0], p[1]]), [['p1', null], ['p2', null]], 'both Load Plans remain; the affected one is Unfiled');
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+test('Folder Stage 1 F-07: an empty Folder and a no-match search say different things, in Grid and List, with a way back', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), folderWorkspacePayload({
+    folders: [{ id: 'f-empty', name: 'Empty Folder', sortOrder: 0 }, { id: 'f-full', name: 'Full Folder', sortOrder: 100 }],
+    packs: [
+      { id: 'p1', title: 'Plan One', loadPlanNumber: 'LP-00000001', folderId: 'f-full' },
+      { id: 'p2', title: 'Plan Two', loadPlanNumber: 'LP-00000002' },
+    ],
+  })]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+  const empty = page.locator('#packs-filter-empty');
+  const titles = ['Plan One', 'Plan Two'];
+
+  for (const view of ['grid', 'list']) {
+    await page.locator(`#packs-view-${view}`).click();
+    await chooseFolderFilter(page, 'Empty Folder (0)');
+    await empty.waitFor({ state: 'visible' });
+    assert.equal((await page.locator('#packs-filter-empty-msg').textContent()).trim(), 'This Folder is empty', `${view}: a Folder that holds nothing says so`);
+    assert.equal((await page.locator('#packs-filter-empty-clear').textContent()).trim(), 'Show all load plans');
+    assert.equal(await empty.isVisible(), true, `${view}: the message is actually on screen`);
+    assert.ok((await empty.boundingBox()).height > 0);
+
+    // A search that matches nothing inside a Folder that has plans is a different message.
+    await chooseFolderFilter(page, 'Full Folder (1)');
+    await page.locator('#packs-search').fill('zzz-nothing');
+    await empty.waitFor({ state: 'visible' });
+    assert.equal((await page.locator('#packs-filter-empty-msg').textContent()).trim(), 'No matching load plans for "zzz-nothing"');
+    assert.equal((await page.locator('#packs-filter-empty-clear').textContent()).trim(), 'Clear filters');
+
+    await page.locator('#packs-filter-empty-clear').click();
+    await empty.waitFor({ state: 'hidden' });
+    assert.equal(await page.locator('#packs-search').inputValue(), '');
+    assert.equal(await page.locator('.tp3d-packs-folder-btn__label').textContent(), 'Folders', 'back to All');
+    const visible = view === 'grid'
+      ? await shownPlans(page, titles)
+      : titles.filter(async () => true);
+    if (view === 'grid') assert.deepEqual(visible, titles);
+    else assert.equal(await page.locator('#packs-tbody tr').count(), 2, 'list: both rows are back');
+  }
+
+  // Unfiled with nothing in it.
+  await moveShownPlan(page, 'Plan Two', 'Full Folder');
+  await chooseFolderFilter(page, 'Unfiled (0)');
+  await empty.waitFor({ state: 'visible' });
+  assert.equal((await page.locator('#packs-filter-empty-msg').textContent()).trim(), 'No unfiled load plans');
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+const undoKey = page => page.keyboard.press('Control+z');
+const redoKey = page => page.keyboard.press('Control+Shift+z');
+
+async function createFolderThroughDialog(page, name) {
+  await chooseFolderAction(page, 'New Folder');
+  const input = page.locator('#modal-root .modal-overlay:not([data-auth-overlay]) input[type="text"]');
+  await input.fill(name);
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await input.waitFor({ state: 'detached' });
+}
+
+async function preferencesJson(page) {
+  return page.evaluate(async () => (await import('/src/core/state-store.js')).get('preferences') && JSON.stringify((await import('/src/core/state-store.js')).get('preferences')));
+}
+
+test('Folder Stage 1 F-08: Load Plans Undo and Redo step through the Folder steps made there, and nothing older', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  await seedFolderWorkspaces(scenario, [[folderWorkspaceKey(ORG_A), folderWorkspacePayload({
+    folders: [{ id: 'f0', name: 'Existing' }],
+    packs: [
+      { id: 'p1', title: 'Plan One', loadPlanNumber: 'LP-00000001', cases: [{ id: 'inst-1', caseId: 'c-1' }] },
+      { id: 'p2', title: 'Plan Two', loadPlanNumber: 'LP-00000002' },
+    ],
+  })]]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+
+  // An earlier, unrelated history step (a preference): Load Plans Undo must never reach it.
+  await page.locator('#packs-view-list').click();
+  await page.locator('#packs-tbody').waitFor({ state: 'visible' });
+  await page.locator('#packs-view-grid').click();
+  await page.locator('#packs-grid .card').first().waitFor({ state: 'visible' });
+  const prefsBefore = await preferencesJson(page);
+  const s0 = await plainFolderState(page);
+
+  await createFolderThroughDialog(page, 'First');
+  const s1 = await plainFolderState(page);
+  await createFolderThroughDialog(page, 'Second');
+  const s2 = await plainFolderState(page);
+  await chooseFolderFilter(page, 'All Load Plans'); // creating a Folder selected it; the plan to move is under All
+  await moveShownPlan(page, 'Plan One', 'First');
+  const s3 = await plainFolderState(page);
+  assert.notEqual(s3, s2);
+
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), s2, 'Undo takes back the move only');
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), s1, 'then the second Folder');
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), s0, 'then the first Folder');
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), s0, 'a further Undo does nothing here');
+  assert.equal(await preferencesJson(page), prefsBefore, 'the earlier preference step was not undone');
+  const cargo = await page.evaluate(async () => (await import('/src/core/state-store.js')).get('packLibrary').find(p => p.id === 'p1').cases);
+  assert.deepEqual(cargo, [{ id: 'inst-1', caseId: 'c-1' }], 'cargo and identities are untouched throughout');
+
+  await redoKey(page);
+  assert.equal(await plainFolderState(page), s1);
+  await redoKey(page);
+  assert.equal(await plainFolderState(page), s2);
+  await redoKey(page);
+  assert.equal(await plainFolderState(page), s3, 'Redo replays the same steps in order');
+  await redoKey(page);
+  assert.equal(await plainFolderState(page), s3);
+  assert.equal(await preferencesJson(page), prefsBefore);
+  const stored = await page.evaluate(key => JSON.parse(localStorage.getItem(key)).folderLibrary.map(f => f.name), folderWorkspaceKey(ORG_A));
+  assert.deepEqual(stored, ['Existing', 'First', 'Second'], 'every undone or redone state is also what is saved');
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});
+
+test('Folder Stage 1 F-08: Folder history is dropped by anything else, and never crosses screens, inputs or workspaces', async t => {
+  const scenario = await harness.createScenario(multiWorkspaceScenario());
+  t.after(() => scenario.close());
+  const workspace = name => folderWorkspacePayload({
+    folders: [{ id: 'f1', name: `${name} One` }],
+    packs: [{ id: 'p1', title: `${name} Plan`, loadPlanNumber: 'LP-00000001' }],
+  });
+  await seedFolderWorkspaces(scenario, [
+    [folderWorkspaceKey(ORG_A), workspace('Alpha')],
+    [folderWorkspaceKey(ORG_B), workspace('Beta')],
+  ]);
+  const page = await scenario.openPage();
+  await openFolderLibrary(scenario, page);
+
+  // Typing context: Undo inside a text input stays native; the Folder step is still undoable afterwards.
+  await createFolderThroughDialog(page, 'Typed Around');
+  const afterCreate = await plainFolderState(page);
+  await page.locator('#packs-search').focus();
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), afterCreate, 'Undo in a text field does not touch Folders');
+  await page.locator('#packs-search').blur();
+  await undoKey(page);
+  assert.notEqual(await plainFolderState(page), afterCreate, 'from the page it undoes the Folder step');
+  assert.ok(!(await plainFolderState(page)).includes('Typed Around'));
+
+  // Switching screens ends the run.
+  await createFolderThroughDialog(page, 'Across Screens');
+  const afterSecond = await plainFolderState(page);
+  await page.locator('[data-nav="cases"]').click();
+  await page.locator('[data-nav="packs"]').click();
+  await page.locator('.tp3d-packs-folder-btn').waitFor({ state: 'visible' });
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), afterSecond, 'after leaving and returning, an older Folder step is not replayed');
+
+  // A different change ends the run too (view mode is a preference step).
+  await createFolderThroughDialog(page, 'Then A Preference');
+  const afterThird = await plainFolderState(page);
+  await page.locator('#packs-view-list').click();
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), afterThird, 'once something else changed, Load Plans Undo stays out of it');
+
+  // Workspace A -> B -> A: the run belongs to the workspace it was made in.
+  await createFolderThroughDialog(page, 'Before Switching');
+  const inAlpha = await plainFolderState(page);
+  await switchWorkspaceAndWait(page, ORG_B, 'Workspace B');
+  await page.locator('.tp3d-packs-folder-btn').waitFor({ state: 'visible' });
+  const inBeta = await plainFolderState(page);
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), inBeta, 'Undo in workspace B does not touch B');
+  await switchWorkspaceAndWait(page, ORG_A, 'Workspace A');
+  await page.locator('.tp3d-packs-folder-btn').waitFor({ state: 'visible' });
+  assert.equal(await plainFolderState(page), inAlpha);
+  await undoKey(page);
+  assert.equal(await plainFolderState(page), inAlpha, 'A to B to A: the old Folder step is gone');
+  assert.deepEqual(scenario.diagnostics.pageErrors, []);
+});

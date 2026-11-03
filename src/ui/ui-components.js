@@ -620,7 +620,7 @@ export function createUIComponents() {
         settled = true;
         resolve(value);
       };
-      showModal({
+      const modal = showModal({
         title: options.title || 'Confirm',
         content: options.message || 'Are you sure?',
         actions: [
@@ -633,6 +633,20 @@ export function createUIComponents() {
         ],
         onClose: () => settle(false),
       });
+      // Lets a caller withdraw exactly this question (it settles false) when what it asks about is gone.
+      if (typeof options.onOpen === 'function') {
+        try {
+          options.onOpen(modal);
+        } catch (_) {
+          // A failing callback must not leave this question open or reject it: close it through its own close
+          // (focus is restored, onClose settles false) and settle false even if that close itself fails.
+          try {
+            modal.close();
+          } finally {
+            settle(false);
+          }
+        }
+      }
     });
   }
 

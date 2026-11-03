@@ -17,6 +17,7 @@ import * as Defaults from './defaults.js';
 import { debounce } from './browser.js';
 import * as StateStore from './state-store.js';
 import {
+  inspectFolderGraph,
   normalizeAppData,
   sanitizeLegacyPackQuantityLibrary,
   stripInternalTruckFields,
@@ -48,6 +49,12 @@ export const APP_RESTORE_RECOVERY_REQUIRED = 'APP_RESTORE_RECOVERY_REQUIRED';
 
 const APP_RESTORE_RECOVERY_VERSION = 1;
 const APP_RESTORE_RECOVERY_SUFFIX = ':app-restore-recovery';
+const FOLDER_GRAPH_EVIDENCE_SUFFIX = ':folder-graph-evidence';
+// One workspace keeps at most this many distinct recovery copies (the first plus later ones) and at most this many
+// characters of them in total. A copy is small (a Workspace Backup allows 2,000 Folders and 1,000 Load Plans, about
+// 450,000 characters in the worst case), and it must never crowd out the workspace itself.
+export const MAX_FOLDER_EVIDENCE_RECORDS = 5;
+export const MAX_FOLDER_EVIDENCE_CHARS = 1000000;
 
 // Storage is scoped first by user, then by active workspace. Preferences stay
 // user-scoped while packs/cases/currentPackId live under the active workspace.
@@ -126,6 +133,107 @@ function getWorkspaceScopedKey() {
 
 function getAppRestoreRecoveryKey(workspaceKey) {
   return `${workspaceKey}${APP_RESTORE_RECOVERY_SUFFIX}`;
+}
+
+// The same data in any key order is the same copy.
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).filter(key => value[key] !== undefined && typeof value[key] !== 'function').sort();
+    return `{${keys.map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  const text = JSON.stringify(value);
+  return text === undefined ? 'null' : text;
+}
+
+function folderEvidenceKey(record) {
+  return canonicalJson({
+    folderLibrary: record && record.folderLibrary,
+    packFolderRefs: record && record.packFolderRefs,
+  });
+}
+
+// The stored evidence, or null when it is not a readable evidence record (it is then never replaced).
+function readFolderEvidence(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    const later = parsed && parsed.laterRecords;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      parsed.kind === 'folder-graph-evidence' &&
+      Array.isArray(parsed.folderLibrary) &&
+      Array.isArray(parsed.packFolderRefs) &&
+      (later === undefined || Array.isArray(later))
+    ) {
+      return parsed;
+    }
+  } catch (_error) {
+    // Not JSON: unreadable.
+  }
+  return null;
+}
+
+/**
+ * Keep a copy of a damaged Folder graph (the Folder records as stored plus every Load Plan folderId) before
+ * anything may repair it. Every distinct graph is kept: the first copy is the record's own fields (the original
+ * single-record format, unchanged), and each later different graph is appended to `laterRecords`. A copy is never
+ * overwritten or dropped, and the same graph is never kept twice. Nothing is written when the copy would pass
+ * MAX_FOLDER_EVIDENCE_RECORDS or MAX_FOLDER_EVIDENCE_CHARS, when the stored evidence cannot be read, when the
+ * browser refuses the write, or when `scopeContext` (the user and workspace the caller acted in) is no longer
+ * the active one. The write is read back before it is called kept.
+ * @param {unknown} folderLibrary
+ * @param {unknown} packLibrary
+ * @param {ReturnType<typeof captureScopeContext>} [scopeContext]
+ * @returns {{ ok: boolean, existing?: boolean, records?: number, reason?: string, message?: string, error?: unknown }}
+ */
+export function preserveFolderGraphEvidence(folderLibrary, packLibrary, scopeContext) {
+  const refuse = (reason, message, error) => ({ ok: false, reason, message, error });
+  try {
+    if (scopeContext !== undefined && !isScopeContextCurrent(scopeContext)) {
+      return refuse('scope-changed', 'The workspace changed.');
+    }
+    const key = `${getWorkspaceScopedKey()}${FOLDER_GRAPH_EVIDENCE_SUFFIX}`;
+    const packs = Array.isArray(packLibrary) ? packLibrary : [];
+    const copy = {
+      folderLibrary: Array.isArray(folderLibrary) ? folderLibrary : [],
+      packFolderRefs: packs
+        .filter(pack => pack && typeof pack === 'object' && pack.folderId != null)
+        .map(pack => ({ id: pack.id, folderId: pack.folderId })),
+    };
+    const previousRaw = window.localStorage.getItem(key);
+    let next;
+    if (previousRaw == null) {
+      next = { kind: 'folder-graph-evidence', version: 1, capturedAt: Date.now(), ...copy };
+    } else {
+      const kept = readFolderEvidence(previousRaw);
+      if (!kept) {
+        return refuse('unreadable', 'The saved recovery copy of the Folder data could not be read.');
+      }
+      const later = kept.laterRecords || [];
+      const held = [kept, ...later];
+      const wanted = folderEvidenceKey(copy);
+      if (held.some(record => folderEvidenceKey(record) === wanted)) {
+        return { ok: true, existing: true, records: held.length };
+      }
+      if (held.length >= MAX_FOLDER_EVIDENCE_RECORDS) {
+        return refuse('limit', `This workspace already keeps ${MAX_FOLDER_EVIDENCE_RECORDS} recovery copies of its Folder data.`);
+      }
+      next = { ...kept, laterRecords: [...later, { capturedAt: Date.now(), ...copy }] };
+    }
+    const raw = JSON.stringify(next);
+    if (raw.length > MAX_FOLDER_EVIDENCE_CHARS) {
+      return refuse('size', 'The recovery copies of this workspace\'s Folder data would be too large to keep.');
+    }
+    window.localStorage.setItem(key, raw);
+    if (window.localStorage.getItem(key) === raw) {
+      return { ok: true, records: 1 + (next.laterRecords ? next.laterRecords.length : 0) };
+    }
+    if (previousRaw != null) window.localStorage.setItem(key, previousRaw);
+    return refuse('storage', 'Could not keep a copy of the damaged Folder data');
+  } catch (error) {
+    return refuse('storage', 'Could not keep a copy of the damaged Folder data', error);
+  }
 }
 
 function fingerprintRaw(raw) {
@@ -406,6 +514,7 @@ function migrateLegacyStoredCaseMass(caseData) {
 export function load() {
   const scopedKey = getScopedKey();
   const workspaceKey = getWorkspaceScopedKey();
+  const loadScope = captureScopeContext();
   pendingLegacyMigration = null;
   try {
     const interruptedRestore = recoverInterruptedAppRestore(scopedKey, workspaceKey);
@@ -487,6 +596,22 @@ export function load() {
 
     if (!preferences && !hasEffectiveWorkspaceData) return null;
 
+    const loadedFolderLibrary =
+      hasEffectiveWorkspaceData && Array.isArray(effectiveWorkspacePayload.folderLibrary)
+        ? effectiveWorkspacePayload.folderLibrary
+        : [];
+    // A damaged Folder graph is loaded as it is (nothing is repaired or dropped here); its original is kept once.
+    if (!inspectFolderGraph(loadedFolderLibrary, identityLibraries.packLibrary).clean) {
+      const kept = preserveFolderGraphEvidence(loadedFolderLibrary, identityLibraries.packLibrary, loadScope);
+      if (!kept.ok) {
+        emit('storage:write_error', {
+          key: workspaceKey,
+          message: kept.reason === 'storage' ? kept.message : `Could not keep another copy of the damaged Folder data. ${kept.message}`,
+          error: kept.error,
+        });
+      }
+    }
+
     return {
       version:
         (effectiveWorkspacePayload && effectiveWorkspacePayload.version) ||
@@ -499,10 +624,7 @@ export function load() {
       preferences,
       caseLibrary: identityLibraries.caseLibrary,
       packLibrary: identityLibraries.packLibrary,
-      folderLibrary:
-        hasEffectiveWorkspaceData && Array.isArray(effectiveWorkspacePayload.folderLibrary)
-          ? effectiveWorkspacePayload.folderLibrary
-          : [],
+      folderLibrary: loadedFolderLibrary,
       currentPackId: hasEffectiveWorkspaceData ? effectiveWorkspacePayload.currentPackId || null : null,
     };
   } catch (err) {
@@ -789,20 +911,22 @@ export function rollbackAppRestore(receipt) {
   return rollbackRestoreRecord(receipt.recoveryRecord, receipt.recoveryKey, receipt.recoveryRaw);
 }
 
-export function saveNow() {
+/**
+ * Write the current state to localStorage now. Resolves to `{ ok: true, savedAt }` once both payloads were
+ * accepted, or `{ ok: false, message, error, blocked? }` when they were not. A failure is announced through
+ * `storage:save_error` unless the caller passes `{ report: false }` because it shows the one message itself.
+ */
+export function saveNow(options) {
+  const report = !(options && options.report === false);
   const scopedKey = getScopedKey();
   const workspaceKey = getWorkspaceScopedKey();
+  const fail = (error, message, extra) => {
+    if (report) emit('storage:save_error', { key: workspaceKey, message, error, ...extra });
+    return { ok: false, message, error, ...extra };
+  };
   try {
     const blocked = getAppRestoreSaveBlock(scopedKey, workspaceKey);
-    if (blocked) {
-      emit('storage:save_error', {
-        key: workspaceKey,
-        message: blocked.message,
-        error: blocked,
-        blocked: true,
-      });
-      return;
-    }
+    if (blocked) return fail(blocked, blocked.message, { blocked: true });
     const state = StateStore.get();
     const sanitizedPacks = sanitizeLegacyPackQuantityLibrary(state.packLibrary).packLibrary;
     const userPayload = {
@@ -824,12 +948,9 @@ export function saveNow() {
     }
     window.localStorage.setItem(workspaceKey, JSON.stringify(workspacePayload));
     emit('storage:saved', { key: workspaceKey, savedAt: workspacePayload.savedAt });
+    return { ok: true, savedAt: workspacePayload.savedAt };
   } catch (err) {
-    emit('storage:save_error', {
-      key: workspaceKey,
-      message: err && err.message ? err.message : 'Save failed',
-      error: err,
-    });
+    return fail(err, err && err.message ? err.message : 'Save failed');
   }
 }
 
