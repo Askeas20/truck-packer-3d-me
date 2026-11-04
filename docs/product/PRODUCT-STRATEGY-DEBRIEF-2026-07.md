@@ -9,10 +9,10 @@ It is:
 - not the active task list;
 - not a permanent behavioral contract;
 - not approval to implement every system described here;
-- subordinate to [Master TODO V5](./TP3D-MASTER-TODO-V5.md) for current operational status; and
+- subordinate to [Master TODO V6](./TP3D-MASTER-TODO-V6.md) for current operational status (V5 is frozen/historical); and
 - subordinate to the named domain contracts for approved behavior within their scope.
 
-The current behavioral authorities include [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md), the [AutoPack Engine Contract](../engineering/autopack-engine-contract.md), and the [Settings Visual System Contract](./SETTINGS-VISUAL-SYSTEM-CONTRACT.md). Where the original debrief conflicts with those documents or with current V5 status, the contract governs behavior and V5 governs status.
+The current behavioral authorities include [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md), the [AutoPack Engine Contract](../engineering/autopack-engine-contract.md), and the [Settings Visual System Contract](./SETTINGS-VISUAL-SYSTEM-CONTRACT.md). Where the original debrief conflicts with those documents or with current V6 status, the applicable contract governs behavior within its scope and [Master TODO V6](./TP3D-MASTER-TODO-V6.md) governs current operational status. V5 is historical, and this July 2026 debrief remains historical strategy context.
 
 All schedules and duration ranges in this document are planning estimates only. They are not commitments, release dates, branch approvals, or staffing promises.
 
@@ -37,7 +37,7 @@ Cases and Packs remain intentionally local-first during current development. Sup
 - Internal UUIDs remain stable technical identity. User-facing business identifiers remain separate from UUIDs and from physical packing signatures.
 - Billing, visual, data-model, persistence, and AutoPack changes must remain isolated and independently validated.
 
-Local Billing Fixture Stage B is the only current active task. Max Capacity Phase C remains blocked until the billing reliability gate is explicitly closed. Current status and approvals are recorded only in [Master TODO V5](./TP3D-MASTER-TODO-V5.md).
+*July 2026 snapshot, superseded:* at the time of this debrief, Local Billing Fixture Stage B was the only active task and Max Capacity Phase C was blocked until the billing reliability gate closed. Current status and approvals are recorded only in [Master TODO V6](./TP3D-MASTER-TODO-V6.md).
 
 ## 3D Rendering and Visual Quality
 
@@ -123,7 +123,7 @@ NoCodeBackend (NCB) is the preferred future migration target for production iden
 
 Reported lag in account, workspace, Settings, and billing flows should be addressed through evidence before provider changes. A focused timing audit should measure session resolution, account data, organization list, active workspace, members, `/billing-status`, rendering, request count, cache behavior, HTTP results, tab state, and workspace identity. Improvements should remain isolated from AutoPack and should follow backend truth rather than mask lifecycle problems in the UI.
 
-Current billing reliability work remains active and is defined in V5. Detailed owner-account, workspace-limit, direct-paid identity, entitlement, and owner-only money-action rules remain governed by [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md); this debrief does not restate or change them.
+As of July 2026, billing reliability work was active and defined in V5; current status is in [Master TODO V6](./TP3D-MASTER-TODO-V6.md). Detailed owner-account, workspace-limit, direct-paid identity, entitlement, and owner-only money-action rules remain governed by [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md); this debrief does not restate or change them.
 
 Stripe remains in development/test-mode use. The final legal seller account is undecided. Before live payments, the product needs a selected and verified seller entity, isolated live credentials, approved products and Prices, branding, payout and team controls, and tested app-created customer flows. If founder pricing is approved, it should use separate Stripe Price records rather than mutate regular prices.
 
@@ -265,7 +265,7 @@ The following groups are not approved branches, are not active work, and do not 
 
 ## Recommended Long-Term Order
 
-This is a broad planning sequence, not the active V5 queue:
+This is a broad planning sequence, not the active queue (see V6):
 
 1. Complete the current billing reliability foundation.
 2. Resume Max Capacity Phase C.
@@ -282,11 +282,11 @@ This is a broad planning sequence, not the active V5 queue:
 13. Consider a public API after server persistence is stable.
 14. Add heavy server infrastructure only when a real workload requires it.
 
-The older debrief began with AutoPack portfolio work. Current V5 records that portfolio and Max Capacity Phases A and B as completed; this roadmap does not reopen them. Stage B billing fixtures remain the only active task, and Phase C remains blocked until billing reliability closes.
+The older debrief began with AutoPack portfolio work. V5 (as of July 2026) recorded that portfolio and Max Capacity Phases A and B as completed; this roadmap does not reopen them. The July 2026 statements that Stage B billing fixtures were the only active task and that Phase C was blocked until billing reliability closed are superseded; see V6.
 
 ## Links to Current Sources of Truth
 
-- [Master TODO V5](./TP3D-MASTER-TODO-V5.md) — current status, blockers, and approved execution queue.
+- [Master TODO V6](./TP3D-MASTER-TODO-V6.md) — current status, blockers, and approved execution queue. ([V5](./TP3D-MASTER-TODO-V5.md) is frozen/historical.)
 - [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md) — approved billing and workspace product semantics.
 - [AutoPack Engine Contract](../engineering/autopack-engine-contract.md) — packing geometry, physical safety, and editor mutation behavior.
 - [Settings Visual System Contract](./SETTINGS-VISUAL-SYSTEM-CONTRACT.md) — approved Settings visual behavior within its scope.

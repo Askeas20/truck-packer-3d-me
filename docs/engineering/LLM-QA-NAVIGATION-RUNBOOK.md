@@ -75,7 +75,7 @@ stated scope; V6 governs whether that work is active or deferred.
 | `src/screens/`                      | Screen-level UI modules: `cases-screen.js`, `packs-screen.js`, `editor-screen.js`, `updates-screen.js`, `roadmap-screen.js` | Screen-specific QA and UI bugs                             | Screen modules delegate persistence to services          |
 | `src/ui/`                           | App shell, overlays, error overlays, system overlay, keyboard manager, truck-change controller, UI components                                     | Overlay and modal QA, error display bugs                   | Many overlays are lazily initialized                     |
 | `src/ui/overlays/`                  | Auth, account, settings, case modal, notes, card display, help, import dialogs                                                                    | Auth flow, settings rendering, modal QA                    | `settings-overlay.js` is large and org-scoped            |
-| `src/editor/`                       | Scene runtime, geometry factory, trailer geometry, space model, wheel-well model, validation, repair, orientation                                 | Editor/3D scene QA, geometry bugs                          | This is separate from `src/packing-core/`                |
+| `src/editor/`                       | Scene runtime, geometry factory, trailer geometry, surface picker, measurement tool, annotation tool                                              | Editor/3D scene QA, geometry bugs                          | This is separate from `src/packing-core/`                |
 | `src/packing-core/`                 | AutoPack budget, domain, explain, orientation, repair, retention-model, solution, space-model, validation, wheel-well-model                       | AutoPack correctness QA                                    | Do not modify solver geometry without explicit V6 scope  |
 | `src/features/editor/`              | Editor feature modules                                                                                                                            | Editor feature flags                                       | May be lightly populated                                 |
 | `src/auth/`                         | Auth permissions and session helpers                                                                                                              | Auth debugging                                             | Session lifecycle is also in `src/core/session.js`       |
@@ -798,11 +798,11 @@ Valid normalized `entitlementStatus` values (from `BILLING_ENTITLEMENT_RULES.md`
 | Controls (orbit/pan/zoom)             | `src/bootstrap/three-runtime.js` (installs OrbitControls) + `src/editor/scene-runtime.js` |
 | Trailer geometry, dimensions          | `src/editor/trailer-geometry.js`                                            |
 | Geometry factory for Case meshes      | `src/editor/geometry-factory.js`                                            |
-| Space model                           | `src/editor/space-model.js` and `src/packing-core/space-model.js`           |
-| Wheel well model                      | `src/editor/wheel-well-model.js` and `src/packing-core/wheel-well-model.js` |
-| Validation (placement)                | `src/editor/validation.js` and `src/packing-core/validation.js`             |
-| Repair (layout repair)                | `src/editor/repair.js` and `src/packing-core/repair.js`                     |
-| Retention model (front overhang)      | `src/editor/retention-model.js` and `src/packing-core/retention-model.js`   |
+| Space model                           | `src/packing-core/space-model.js`                                           |
+| Wheel well model                      | `src/packing-core/wheel-well-model.js`                                      |
+| Validation (placement)                | `src/packing-core/validation.js`                                            |
+| Repair (layout repair)                | `src/packing-core/repair.js`                                                |
+| Retention model (front overhang)      | `src/packing-core/retention-model.js`                                       |
 | Case mesh creation, labels, selection | `src/screens/editor-screen.js` + scene runtime                              |
 | Drag/move, rotation, nudge            | `src/screens/editor-screen.js` (InteractionManager)                         |
 | Collision, support checks             | `src/packing-core/validation.js`                                            |

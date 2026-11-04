@@ -246,7 +246,7 @@ Built with:
 
 **Version**: 1.0.0  
 **Author**: 360 Virtual Tour Solutions  
-**Last Updated**: August 2026
+**Last Updated**: November 2026
 
 ## Current Roadmap
 
@@ -265,3 +265,9 @@ operational status, approved execution queue, and next milestone.
 - **Business Identity** — Case item codes, Load Plan numbers, customer references.
 - **Billing/Platform Foundation** — server-side workspace limits, org security, slug integrity,
   normalized billing entitlement.
+- **Editor camera and view controls** — named camera views, Perspective/Orthographic projection,
+  optional Zoom controls (PRs #120–#124).
+- **Measurements and Annotations** — persistent point-to-point Measurement Tool, Callouts, Arrows and
+  freehand Drawing, with shared Undo/Redo (PRs #125–#129).
+- **Folder Foundation Stage 1** — Folder security, workspace-scoped persistence, damaged-data
+  recovery, and Undo/Redo corrections (PR #132).
