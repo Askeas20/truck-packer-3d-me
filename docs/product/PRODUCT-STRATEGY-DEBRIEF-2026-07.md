@@ -12,7 +12,7 @@ It is:
 - subordinate to [Master TODO V6](./TP3D-MASTER-TODO-V6.md) for current operational status (V5 is frozen/historical); and
 - subordinate to the named domain contracts for approved behavior within their scope.
 
-The current behavioral authorities include [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md), the [AutoPack Engine Contract](../engineering/autopack-engine-contract.md), and the [Settings Visual System Contract](./SETTINGS-VISUAL-SYSTEM-CONTRACT.md). Where the original debrief conflicts with those documents or with current V5 status, the contract governs behavior and V5 governs status.
+The current behavioral authorities include [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md), the [AutoPack Engine Contract](../engineering/autopack-engine-contract.md), and the [Settings Visual System Contract](./SETTINGS-VISUAL-SYSTEM-CONTRACT.md). Where the original debrief conflicts with those documents or with current V6 status, the applicable contract governs behavior within its scope and [Master TODO V6](./TP3D-MASTER-TODO-V6.md) governs current operational status. V5 is historical, and this July 2026 debrief remains historical strategy context.
 
 All schedules and duration ranges in this document are planning estimates only. They are not commitments, release dates, branch approvals, or staffing promises.
 
