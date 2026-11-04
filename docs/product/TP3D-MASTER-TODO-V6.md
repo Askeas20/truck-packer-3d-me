@@ -152,7 +152,7 @@
 4. A cargo instance whose Case definition is missing is Unresolved (geometry cannot be verified).
 5. Measurement IDs are unique within a Load Plan only; duplicate/import may regenerate them.
 
-**Non-goals:** Text Annotations, Drawing, PDF Construction, AutoPack changes, clearance/gap analysis or any safety or compliance claim, any handles beyond the two line-style endpoint grips, measurement Undo/Redo, snapping beyond the picked surface point, database or backend changes, and any change to existing PDF/image exports (data is stored only so the future PDF Construction milestone can consume it).
+**Non-goals:** Text Annotations, Drawing, PDF Construction, AutoPack changes, clearance/gap analysis or any safety or compliance claim, any handles beyond the two line-style endpoint grips, measurement Undo/Redo *(a V1 non-goal; added later by PR #129 as part of the shared history, see G2)*, snapping beyond the picked surface point, database or backend changes, and any change to existing PDF/image exports (data is stored only so the future PDF Construction milestone can consume it).
 
 **Known limitations (V1, stated so they are not mistaken for guarantees):**
 - Truck geometry is compared as the list of usable-zone boxes. Two configurations that tile the same volume with a different decomposition (for example Wheel Wells of zero size versus a standard truck) are treated as different: Needs Review, never a falsely Valid point.
@@ -161,7 +161,7 @@
 - Records saved before the effective zones were remembered cannot prove an older Front Overhang or Wheel Well truck and show Needs Review until the owner deletes and recreates them. No automatic migration invents the missing geometry.
 - A stored Load Plan that already contains a repeated cargo ID is kept as it is (Unresolved anchors, picks refused with a message); V1 offers no repair UI. Importing or restoring such a plan is refused.
 - Measurements are informational: the surface tolerance (0.01 in + 1e-6 of the largest dimension) and the face-level geometry are not a certified metrology claim.
-- GitHub Quality Gate and independent re-verification have not run for this correctness pass.
+- *(Pre-merge note, kept as history.)* When this was written, the GitHub Quality Gate and independent re-verification had not run for this correctness pass. The Quality Gate has since passed on PR #125; whether further independent re-verification was performed is not recorded here.
 
 **Implementation stages** (each requires explicit owner release; focused local checks per stage; owner visual acceptance and one PR Quality Gate at closeout):
 

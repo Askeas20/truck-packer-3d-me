@@ -123,7 +123,7 @@ NoCodeBackend (NCB) is the preferred future migration target for production iden
 
 Reported lag in account, workspace, Settings, and billing flows should be addressed through evidence before provider changes. A focused timing audit should measure session resolution, account data, organization list, active workspace, members, `/billing-status`, rendering, request count, cache behavior, HTTP results, tab state, and workspace identity. Improvements should remain isolated from AutoPack and should follow backend truth rather than mask lifecycle problems in the UI.
 
-Current billing reliability work remains active and is defined in V5. Detailed owner-account, workspace-limit, direct-paid identity, entitlement, and owner-only money-action rules remain governed by [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md); this debrief does not restate or change them.
+As of July 2026, billing reliability work was active and defined in V5; current status is in [Master TODO V6](./TP3D-MASTER-TODO-V6.md). Detailed owner-account, workspace-limit, direct-paid identity, entitlement, and owner-only money-action rules remain governed by [Billing Entitlement Rules](./BILLING_ENTITLEMENT_RULES.md); this debrief does not restate or change them.
 
 Stripe remains in development/test-mode use. The final legal seller account is undecided. Before live payments, the product needs a selected and verified seller entity, isolated live credentials, approved products and Prices, branding, payout and team controls, and tested app-created customer flows. If founder pricing is approved, it should use separate Stripe Price records rather than mutate regular prices.
 
@@ -265,7 +265,7 @@ The following groups are not approved branches, are not active work, and do not 
 
 ## Recommended Long-Term Order
 
-This is a broad planning sequence, not the active V5 queue:
+This is a broad planning sequence, not the active queue (see V6):
 
 1. Complete the current billing reliability foundation.
 2. Resume Max Capacity Phase C.
