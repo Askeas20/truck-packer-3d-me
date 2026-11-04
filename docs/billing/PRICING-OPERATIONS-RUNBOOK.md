@@ -322,7 +322,7 @@ The following remain unresolved and are not approved by this runbook:
 - coupon and promotion policy;
 - lifetime and complimentary access.
 
-Operational priority and approval come from [Master TODO V5](../product/TP3D-MASTER-TODO-V5.md). Broader context is preserved in the [July 2026 Product Strategy Debrief](../product/PRODUCT-STRATEGY-DEBRIEF-2026-07.md).
+Operational priority and approval come from [Master TODO V6](../product/TP3D-MASTER-TODO-V6.md). Broader context is preserved in the [July 2026 Product Strategy Debrief](../product/PRODUCT-STRATEGY-DEBRIEF-2026-07.md).
 
 ## 16. Catalog Implementation Status
 

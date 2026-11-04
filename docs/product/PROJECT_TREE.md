@@ -1,5 +1,7 @@
 # File Tree: Truck Packer 3D
 
+> **Point-in-time snapshot (generated 2026-07-16) — not an authority.** It does not track later changes. For current structure use the repository itself or Graphify; for status use [Master TODO V6](./TP3D-MASTER-TODO-V6.md).
+
 **Generated:** 7/16/2026
 **Root Path:** `/Users/franciscooliveira/Dropbox/360Virtual Tour Solutions/Projects/Truck Packer 3D`
 

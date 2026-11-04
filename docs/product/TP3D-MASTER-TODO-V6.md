@@ -1,6 +1,6 @@
 # Truck Packer 3D — Master TODO V6
 
-**Last updated:** 2026-11-01
+**Last updated:** 2026-11-04
 **Status:** Active operational roadmap.
 
 ---
@@ -35,7 +35,8 @@
 | Node requirement | `^20.19.0` or `>=22.12.0` |
 | Verified main after CI optimization (2026-10-17) | `a3c47f28c7930778771ac0806d398be22ed712a4` — PR #123 merged; main updated on GitHub |
 | Verified main after Camera Controls Relocation (2026-10-17) | `c28fca550d827b67d855832ea913a57cf8423674` — PR #124 merged |
-| Measurement Tool V1 branch | `feat/editor-measurement-tool-v1`, created from `c28fca550d827b67d855832ea913a57cf8423674`; contract approved; implementation visually approved by the owner on 2026-10-18 and locally validated (lint, typecheck, Node and browser lanes, build, audit); GitHub Quality Gate and final merge approval pending (Section 4.1) |
+| Measurement Tool V1 | **MERGED** — PR #125, merge `036490a` (2026-10-20), from `feat/editor-measurement-tool-v1` (created from `c28fca550d827b67d855832ea913a57cf8423674`); Quality Gate passed. Contract and history: Section 4.1. Later refined by PR #129 (Section 3) |
+| Verified main after Folder Foundation Stage 1 (2026-11-03) | `3052224bf1506ad529db2c3f2105437d864ad021` — PR #132 merged; local `main` matched `origin/main` |
 | Quality Gate cost policy | One automatic **fast** Quality Gate for PRs targeting `main` (about 4–5 minutes: static checks, the full Node lane, a small Chromium smoke set, build, production audit, patch whitespace; 10-minute fail-safe); the complete Chromium regression is the local `npm run test:regression`, run before major releases or after high-risk changes and never scheduled; optional manual `workflow_dispatch`; no automatic run after merge/push to `main`. Focused local checks during implementation; documentation-only changes require diff/status checks, not application suites. |
 
 ---
@@ -44,7 +45,9 @@
 
 | Milestone | Key Result | PR / SHA |
 |---|---|---|
+| Folder Foundation Stage 1 | Folder security (names rendered as text; dialogs and menus bound to the user and workspace they opened in), workspace-scoped persistence and honest save results, damaged-Folder-graph detection with explicit repair that keeps recovery evidence (never silent), Unfiled kept separate from Folder ids, no-op rename/move writes nothing, empty-state and filter wording, Load Plans Undo/Redo scoped to Folder steps (Editor Undo/Redo unchanged), and the ten Stage 1 real-app tests in the browser CI lane. Completed 2026-11-03. Known limitations and deferred follow-ups: Section 6. **Folder Enhancement V1 is a separate, not yet approved milestone (Section 4)** | PR #132, merge `3052224` |
 | Editor Annotations, Measurements & Unified Undo/Redo | Independent Annotations and Measurements managers; direct scene selection of existing Arrows and Measurements; editable endpoints; whole-Arrow and whole-Measurement movement on one compatible physical surface; shared single-sequence Undo/Redo with exact `lastEdited` restoration; Drawing and Callout refinements; preview and historical-state handling. Completed 2026-11-01. Open limitations are in Section 4.1 *Visibility* | PR #129, merge `61fc340` (feature head `b4bcd61`) |
+| Measurement Tool V1 and Annotations V1 (Callouts, Arrows, Drawing) | Persistent point-to-point Measurement Tool (contract: Section 4.1); persistent 3D Callouts (V1A), directional Arrows (V1B.1) and freehand Drawing (V1B.2). Each passed the PR Quality Gate before merge. Completed 2026-10-20 to 2026-10-28; refined by PR #129 above | PR #125 `036490a`; PR #126 `bd68ac8`; PR #127 `df4d7f8`; PR #128 `e26427e` |
 | Quantity Controls | Ecommerce-style Case Qty, atomic Undo/Redo, multi-unit staging, Cases/Load Plans qty surfaces, PDF reporting, legacy cleanup | PR #20, `37d2c4c` |
 | LLM QA Navigation Runbook | Runbook for AI-assisted QA navigation | PR #22 |
 | Three.js npm/Vite migration | Migrated Three.js r160 from CDN/vendor to npm + Vite build pipeline | PR #23, `be62612` |
@@ -68,32 +71,34 @@
 | Camera Phase 2 | Interactive Perspective / Orthographic projection, per-Load-Plan camera metadata, Settings integration and export support; live PDF acceptance passed | PR #121 |
 | Optional viewport Zoom Controls | Zoom In/Out for both projections; Settings On/Off visibility | PR #122 |
 | Quality Gate cost optimization | Preserve PR and manual gate; stop duplicate runs after merge | PR #123 |
-| Quality Gate speed | Split the PR gate (fast smoke) from the full local regression (`test:regression`); shell-only Chromium install; 10-minute fail-safe | Measurement Tool V1 PR |
+| Quality Gate speed | Split the PR gate (fast smoke) from the full local regression (`test:regression`); shell-only Chromium install; 10-minute fail-safe | PR #125 |
 | Camera controls relocation | Camera Views button moved into the floating viewport group above Zoom In/Out; independent Show Camera Controls setting on the lightweight visibility route | PR #124, `c28fca5` |
 
 ---
 
 ## 4. Current Active / Next Milestone
 
-**Current status:** Measurement Tool V1 is the next milestone. Its contract is owner-approved and locked (Section 4.1) and branch `feat/editor-measurement-tool-v1` exists from `c28fca5`, and the Stage 0 documentation checkpoint is owner-approved. **The implementation is on the branch. The owner reviewed it on 2026-10-17, requested a UX correction pass and small header adjustments, and visually approved the result on 2026-10-18; the owner then specified that one Escape press fully exits Measurement Mode, which is implemented and covered by specs. Local validation passed (ESLint, Stylelint, HTML validation, typecheck, the Node and Chromium test lanes with new measurement specs, production build, dependency audit). Status: implementation visually approved and locally validated; GitHub Quality Gate and final merge approval pending.** Camera Phase 1, Camera Phase 2, optional Zoom Controls and the Camera Controls relocation are complete and merged (PRs #120–#124). The owner accepted live PDF verification for Camera Phase 2 on 2026-10-17. PR #123 closed the duplicate full Quality Gate after merge.
+**Current status (2026-11-04):** **No implementation milestone is currently active.** Folder Foundation Stage 1 is complete and merged (PR #132; Section 3). Measurement Tool V1 and Annotations V1 (Callouts, Arrows, Drawing) are complete and merged (PRs #125–#129; Section 3), as are Camera Phase 1, Camera Phase 2, optional Zoom Controls and the Camera Controls relocation (PRs #120–#124). The owner accepted live PDF verification for Camera Phase 2 on 2026-10-17. PR #123 closed the duplicate full Quality Gate after merge.
 
-### Owner-approved next sequence (planning order, not blanket implementation authorization)
+**Next planned product-review milestone: Folder Enhancement V1.** Its product contract has **not** been approved and its implementation has **not** started. Before any implementation branch exists, the owner reviews the Folder Enhancement V1 mockups, the existing Folder UI, the earlier recommendations and the deferred Stage 1 follow-ups (Section 6), then approves a complete product contract. A candidate is not active until this section names it as approved.
+
+### Owner-approved sequence (planning order, not blanket implementation authorization)
 
 | Order | Milestone | Intended outcome / contract to define | State |
 |---|---|---|---|
-| 1 | **Measurement Tool V1** | Illustrative, informational point-to-point ruler saved with each Load Plan. Approved scope, non-goals, anchoring and persistence rules, and stage gates: Section 4.1. | **CONTRACT APPROVED — implementation visually approved and locally validated; GitHub Quality Gate and final merge approval pending** |
-| 2 | **Annotations: Text and Drawing** | Add notes/labels and graphical marks/arrows independently of cargo geometry. Define anchoring, editing, storage, visibility, permissions, and screenshot/PDF inclusion before coding. Text and Drawing can be scoped into small releases. | **PLANNED — after Measurement** |
-| 3 | **PDF Construction / Interactive Export Preview** | Clicking **Export PDF** opens a document-construction screen showing the proposed PDF. Users can modify the presentation/layout and content before selecting the final **Export PDF** action. Specify available editing, page reordering/layout, accurate print preview, templates/persistence, billing gates, and export safety in its product contract. Do not mutate cargo data by editing the document. | **PLANNED — after Annotations** |
+| 1 | **Measurement Tool V1** | Illustrative, informational point-to-point ruler saved with each Load Plan. Approved scope, non-goals, anchoring and persistence rules, and stage gates: Section 4.1. | ✅ **COMPLETE / MERGED** (PR #125; refined by PR #129) |
+| 2 | **Annotations: Text and Drawing** | Notes/labels and graphical marks/arrows independent of cargo geometry. Delivered as Callouts (V1A), Arrows (V1B.1) and Drawing (V1B.2), then unified with Measurements in PR #129. | ✅ **COMPLETE / MERGED** (PRs #126–#129) |
+| 3 | **PDF Construction / Interactive Export Preview** | Clicking **Export PDF** opens a document-construction screen showing the proposed PDF. Users can modify the presentation/layout and content before selecting the final **Export PDF** action. Specify available editing, page reordering/layout, accurate print preview, templates/persistence, billing gates, and export safety in its product contract. Do not mutate cargo data by editing the document. | **PLANNED — contract not defined; not started.** Its order relative to Folder Enhancement V1 is not recorded here (owner decision) |
 
 **Removed from roadmap:** Zoom to Area / Magnifying Glass. Do not implement or propose it as part of Zoom Controls or the Measurement Tool.
 
-**Owner sequencing:** Finish Measurement first, then Annotations (Text and Drawing), then PDF Construction. Each phase requires its own scoped acceptance and release checkpoint. Do not bundle these into a single implementation branch.
+**Owner sequencing:** Measurement, then Annotations (Text and Drawing) — both complete — then PDF Construction. Each phase requires its own scoped acceptance and release checkpoint. Do not bundle these into a single implementation branch.
 
-**Held work:** C5 AutoPack quality and related follow-ups are **PAUSED** due to unresolved load realism/transport-quality concerns. C6 reporting is **DEFERRED**. No changes to separate stabilization, Claude visual, or Codex visual worktrees are authorized.
+**Held work:** C5 AutoPack quality and related follow-ups are **PAUSED** due to unresolved load realism/transport-quality concerns. C6 reporting is **DEFERRED**. The Claude visual (`feat/cargo-visual-v5-claude`, no commits beyond `main`) and Codex visual (`feat/cargo-visual-v4-codex`, one commit not on `main`) checkouts are visual R&D, not merged product features; no changes to them, or to any separate stabilization worktree, are authorized.
 
 ### 4.1 Measurement Tool V1 — Approved Contract
 
-**Status:** 🔒 Locked 2026-10-17 (owner-approved, including Stage 0 and the derived rules below). **Revised 2026-10-17 by the owner after visual review** (decisions 1, 3 and 4, the Interaction, Management and Presentation bullets, derived rule 3 and the non-goals); those revisions and their implementation were **visually approved by the owner on 2026-10-18**, and the same day the owner made Escape a one-press exit from the mode. Status: **implementation visually approved and locally validated; GitHub Quality Gate and final merge approval pending.** Two independent source audits followed. The first (2 P1 and 6 P2 findings: ambiguous import IDs, truck configuration, cargo surfaces, numeric limits, export preflight, cargo-pose gestures, provisional poses, thumbnail retry) was remediated before publication. The second led to an owner-directed root-cause correctness pass (2026-10-18) that strengthened three contracts below and closed the remaining gaps: **cargo instance IDs are unique within a Load Plan** (an owner-approved strengthening of the data contract that supersedes the earlier `EXPORT-C-LP-3` expectation that Load Plan import could accept duplicate source IDs because it regenerates them); **truck-shell anchors are judged against the effective usable zones and are Valid only when the original geometry is proven**; and **cylinder/drum anchors are validated against the real faceted 24-sided mesh**. A real held-case integration test and an end-to-end Screenshot/PDF/thumbnail acceptance test (`EXPORT-M`) were added. A third audit then found two correctness defects, both corrected at their root: **truck-shell points could be created on a surface the Editor does not draw** (the bounding box of the usable zones was treated as proof that a wall exists, so a point in the Front Overhang cab void was accepted as a front-wall point), and **normalization canonicalized a cargo ID without carrying its measurement anchors** (a valid backup lost the relationship). Measurable truck faces are now the exposed physical faces the Editor draws, one model shared by picking, anchor creation, resolution and validity and pinned against the real scene by a parity test; and one identity policy (the trimmed ID) maps every anchor with its cargo, idempotently. Independent re-verification and the GitHub Quality Gate are pending; this is not a release approval. Specs: `tests/audit/measurement-tool-core.spec.mjs`, `measurement-tool-lifecycle.spec.mjs` (Node lane), `measurement-tool-interaction.spec.mjs` and the `P2-8`/`EXPORT-M` cases of `preview-identity-context.spec.mjs` (Chromium lane); `EXPORT-C-LP-3` in `export-integrity-c.spec.mjs` carries the revised import contract. Branch `feat/editor-measurement-tool-v1`; baseline `c28fca550d827b67d855832ea913a57cf8423674`. Agent-facing summary: `AGENTS.md` (Measurement Tool V1 Invariants).
+**Status:** 🔒 Locked 2026-10-17 (owner-approved, including Stage 0 and the derived rules below). **Revised 2026-10-17 by the owner after visual review** (decisions 1, 3 and 4, the Interaction, Management and Presentation bullets, derived rule 3 and the non-goals); those revisions and their implementation were **visually approved by the owner on 2026-10-18**, and the same day the owner made Escape a one-press exit from the mode. Status: **MERGED — PR #125 (merge `036490a`, 2026-10-20; Quality Gate passed), later refined by PR #129.** The pre-merge history below is retained as implementation evidence. Two independent source audits followed. The first (2 P1 and 6 P2 findings: ambiguous import IDs, truck configuration, cargo surfaces, numeric limits, export preflight, cargo-pose gestures, provisional poses, thumbnail retry) was remediated before publication. The second led to an owner-directed root-cause correctness pass (2026-10-18) that strengthened three contracts below and closed the remaining gaps: **cargo instance IDs are unique within a Load Plan** (an owner-approved strengthening of the data contract that supersedes the earlier `EXPORT-C-LP-3` expectation that Load Plan import could accept duplicate source IDs because it regenerates them); **truck-shell anchors are judged against the effective usable zones and are Valid only when the original geometry is proven**; and **cylinder/drum anchors are validated against the real faceted 24-sided mesh**. A real held-case integration test and an end-to-end Screenshot/PDF/thumbnail acceptance test (`EXPORT-M`) were added. A third audit then found two correctness defects, both corrected at their root: **truck-shell points could be created on a surface the Editor does not draw** (the bounding box of the usable zones was treated as proof that a wall exists, so a point in the Front Overhang cab void was accepted as a front-wall point), and **normalization canonicalized a cargo ID without carrying its measurement anchors** (a valid backup lost the relationship). Measurable truck faces are now the exposed physical faces the Editor draws, one model shared by picking, anchor creation, resolution and validity and pinned against the real scene by a parity test; and one identity policy (the trimmed ID) maps every anchor with its cargo, idempotently. At the time of writing, independent re-verification and the GitHub Quality Gate were pending; PR #125 has since been merged with a passing Quality Gate. Merge to `main` is not by itself a production release approval. Specs: `tests/audit/measurement-tool-core.spec.mjs`, `measurement-tool-lifecycle.spec.mjs` (Node lane), `measurement-tool-interaction.spec.mjs` and the `P2-8`/`EXPORT-M` cases of `preview-identity-context.spec.mjs` (Chromium lane); `EXPORT-C-LP-3` in `export-integrity-c.spec.mjs` carries the revised import contract. Branch `feat/editor-measurement-tool-v1`; baseline `c28fca550d827b67d855832ea913a57cf8423674`. Agent-facing summary: `AGENTS.md` (Measurement Tool V1 Invariants).
 
 **Nature:** An illustrative, informational point-to-point ruler. Measurements are planning references — not certified measurements, minimum-clearance results, or safety/compliance findings. It is not a placement, load-optimization or AutoPack feature, and it never changes handling rules, collision, cargo physics, assessment, Space Utilization or the existing PDF. Keep the user-facing experience simple.
 
@@ -168,7 +173,7 @@
 | 3 | Setting and control shell: `showMeasurementTool` through defaults, normalizer, Settings and the visibility route; ruler button and mode flag, no tool behavior | Existing camera/zoom control tests stay green; lightweight-route test; hide-while-active exits mode |
 | 4 | Interaction (G6): mode owner, picking on any visible surface (cargo of any shape, truck floor/walls/ceiling, ground), pending point, click feedback, busy/preview gating, Escape exit and ownership | Existing selection, drag, keyboard and modal-ownership tests stay green; new ownership tests; localhost QA |
 | 5 | Presentation: overlay pass and labels, list (rename/delete/status), G5 capture exclusion, disposal; UX correction pass 2026-10-17 (restrained dimension lines, one distance, endpoint grips and repositioning, compact collapsible list; visually approved 2026-10-18) | Exclusion tests for screenshot/PDF/thumbnail/preview; both projections and themes; no resource growth across repeated toggles |
-| 6 | Closeout: owner visual acceptance, one PR Quality Gate, Section 3 row | Owner acceptance; gate green |
+| 6 | Closeout: owner visual acceptance, one PR Quality Gate, Section 3 row | ✅ Done — owner acceptance; gate green; merged in PR #125 |
 
 **Open technical items (settle in Stage 1; none blocks the contract):** the mechanism for the G1 non-destructive local-recovery invariant (preserve the original record, surface the condition, block destructive autosave until resolved) and, in Stage 2, for the G2 `lastEdited` invariant; the floor-surface source of truth (the editor's `TrailerGeometry` duplicates `PackLibrary` zone formulas — consume one and pin parity); a measurement-specific length formatter (`formatLength` rounds inches to whole numbers); confirmation that Truck Change preserves instance IDs (not traced in the audit).
 
@@ -197,6 +202,7 @@ These are unapproved candidates outside the owner-approved sequence in Section 4
    - Test at 1 / 25 / 100 / 300 counts
 
 4. **Folder Sidebar Implementation**
+   - Unapproved. Folder Foundation Stage 1 is complete (PR #132; Section 3). Folder Enhancement V1 (Section 4) is where the next Folder product contract is reviewed; nothing here is approved by it.
 
 5. **Load Plans / Stops / Unload Sequence**
    - Define sequencing/data model before Auto-Pack v2
@@ -226,7 +232,7 @@ These are unapproved candidates outside the owner-approved sequence in Section 4
     - Postpone until **after 3D realism and richer scene presentation**
     - If later approved, build on the Generic Space Utilization Engine; capacity analysis only, not safety/compliance scoring
 
-**Completed, not a candidate:** Camera / View System (PRs #120–#121) and optional Zoom Controls (PR #122).
+**Completed, not a candidate:** Camera / View System (PRs #120–#121), optional Zoom Controls (PR #122), Measurement Tool V1 and Annotations V1 (PRs #125–#129) and Folder Foundation Stage 1 (PR #132).
 
 ---
 
@@ -297,6 +303,7 @@ See [AutoPack Engine Contract — Editor Authority and Automation Boundary](../e
 
 Not approved branches. Not active work. Require focused audits and product decisions before implementation.
 
+- Folder Stage 1 follow-ups (known limitations recorded in PR #132; none is a defect, none is approved): Folder Undo/Redo is intentionally narrow (any non-Folder state write ends the Folder run); damaged-graph recovery evidence is browser-local, capped at 5 copies and 1,000,000 serialized characters per workspace, has no in-app download or management interface, and repair fails safely with no in-app remedy once the cap is reached; one earlier F-02 browser timing failure has no recorded cause and was not reproduced. Review with Folder Enhancement V1 (Section 4).
 - Next-generation billing hardening (workspace-to-Stripe identity, cross-table consistency, billing anomaly logging)
 - Workspace Slug Phase 2 (friendly slugs, owner-editable, routing)
 - Pack Publishing / Crew View / Share Links
@@ -366,6 +373,7 @@ Not approved branches. Not active work. Require focused audits and product decis
 ## 8. Technical Debt / Security Follow-ups
 
 - `.claude/settings.local.json` — git-ignored, previously flagged as potentially containing credential-bearing commands. Do not print or modify during normal sessions. Dedicated security/credential cleanup required before broad beta.
+- **Implemented locally, NOT merged — preserve:** `fix/stripe-fixture-persistent-subscription-guard` at `9671de3` (`fix(billing-fixtures): refuse to cancel Stripe subscriptions not proven fixture-owned`). It exists only in the local repository (no `origin` ref) and has no PR. Do not delete, rebase or push it without the owner; a review and merge decision is pending.
 - Development retains legacy schema differences (cases/packs, policy/function, billing ID). Separate audit required.
 - Workspace Slug Phase 2 (friendly slugs) remains required product work.
 - `docs/product/PROJECT_TREE.md` is a point-in-time snapshot (2026-07-16) — no active authority.
