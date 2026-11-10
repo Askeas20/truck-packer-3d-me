@@ -1,5 +1,4 @@
 import { readFile } from 'node:fs/promises';
-
 import { defineConfig } from 'vite';
 
 const VENDOR_FALLBACK_FILES = [
@@ -30,6 +29,39 @@ function preserveVendorFallbacks() {
   };
 }
 
+// Plugin koji automatski ubacuje "bypass" skriptu u buildovani HTML
+function injectBillingBypass() {
+  return {
+    name: 'tp3d-billing-bypass',
+    transformIndexHtml(html) {
+      return html.replace(
+        '<head>',
+        `<head>
+        <script>
+          // Automatski presreće biling poziv i podmeće lažni Pro status
+          const originalFetch = window.fetch;
+          window.fetch = async (...args) => {
+            if (typeof args[0] === 'string' && args[0].includes('billing-status')) {
+              return new Response(JSON.stringify({
+                ok: true,
+                isPro: true,
+                isActive: true,
+                plan: 'pro',
+                entitlementStatus: 'active',
+                data: { subscription: { status: 'active' }, isActive: true }
+              }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+              });
+            }
+            return originalFetch(...args);
+          };
+        </script>`
+      );
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
   server: {
@@ -47,5 +79,5 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
   },
-  plugins: [preserveVendorFallbacks()],
+  plugins: [preserveVendorFallbacks(), injectBillingBypass()],
 });
